@@ -178,50 +178,57 @@ async function discoverBtc5mFromGammaProbe(currentStartTs: number): Promise<Poly
 export async function discoverBtc5mMarket(): Promise<PolymarketDiscoverResponse> {
   const currentStartTs = currentWindowStartTs();
   try {
-    const html = await requestText(
-      "https://www.polymarket.com/crypto/5M",
-      "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-    );
+    // 优先 API 直连探测，避免对 polymarket.com HTML 的硬依赖
+    return await discoverBtc5mFromGammaProbe(currentStartTs);
+  } catch (gammaError) {
+    try {
+      const html = await requestText(
+        "https://www.polymarket.com/crypto/5M",
+        "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+      );
 
-    const matches = Array.from(html.matchAll(/btc-updown-5m-(\d{10})/g));
-    const numbers = Array.from(new Set(matches.map((item) => Number(item[1])).filter(Number.isFinite))).sort((a, b) => a - b);
+      const matches = Array.from(html.matchAll(/btc-updown-5m-(\d{10})/g));
+      const numbers = Array.from(new Set(matches.map((item) => Number(item[1])).filter(Number.isFinite))).sort((a, b) => a - b);
 
-    if (numbers.length === 0) {
-      throw new Error("在 /crypto/5M 页面里没有解析到 BTC 5m slug");
+      if (numbers.length === 0) {
+        throw new Error("在 /crypto/5M 页面里没有解析到 BTC 5m slug");
+      }
+
+      const score = (startTs: number) => {
+        if (startTs === currentStartTs) return [0, 0] as const;
+        if (startTs === currentStartTs + 300) return [1, 300] as const;
+        if (startTs === currentStartTs - 300) return [2, 300] as const;
+        return [10, Math.abs(startTs - currentStartTs)] as const;
+      };
+
+      const ordered = [...numbers].sort((a, b) => {
+        const scoreA = score(a);
+        const scoreB = score(b);
+        return scoreA[0] - scoreB[0] || scoreA[1] - scoreB[1];
+      });
+
+      const chosen = ordered[0];
+      const startUtc = new Date(chosen * 1000);
+      const endUtc = new Date((chosen + 300) * 1000);
+
+      return {
+        ok: true,
+        source: "https://www.polymarket.com/crypto/5M",
+        slug: `btc-updown-5m-${chosen}`,
+        startTs: chosen,
+        endTs: chosen + 300,
+        startUtc: startUtc.toISOString(),
+        endUtc: endUtc.toISOString(),
+        startEt: startUtc.toLocaleString("sv-SE", { timeZone: "America/New_York" }).replace(" ", "T"),
+        endEt: endUtc.toLocaleString("sv-SE", { timeZone: "America/New_York" }).replace(" ", "T"),
+        currentStartTs,
+        candidates: ordered.slice(0, 10).map((v) => `btc-updown-5m-${v}`),
+      };
+    } catch (htmlError) {
+      const gammaMessage = gammaError instanceof Error ? gammaError.message : String(gammaError);
+      const htmlMessage = htmlError instanceof Error ? htmlError.message : String(htmlError);
+      throw new Error(`市场发现失败：gamma=${gammaMessage}; html=${htmlMessage}`);
     }
-
-    const score = (startTs: number) => {
-      if (startTs === currentStartTs) return [0, 0] as const;
-      if (startTs === currentStartTs + 300) return [1, 300] as const;
-      if (startTs === currentStartTs - 300) return [2, 300] as const;
-      return [10, Math.abs(startTs - currentStartTs)] as const;
-    };
-
-    const ordered = [...numbers].sort((a, b) => {
-      const scoreA = score(a);
-      const scoreB = score(b);
-      return scoreA[0] - scoreB[0] || scoreA[1] - scoreB[1];
-    });
-
-    const chosen = ordered[0];
-    const startUtc = new Date(chosen * 1000);
-    const endUtc = new Date((chosen + 300) * 1000);
-
-    return {
-      ok: true,
-      source: "https://www.polymarket.com/crypto/5M",
-      slug: `btc-updown-5m-${chosen}`,
-      startTs: chosen,
-      endTs: chosen + 300,
-      startUtc: startUtc.toISOString(),
-      endUtc: endUtc.toISOString(),
-      startEt: startUtc.toLocaleString("sv-SE", { timeZone: "America/New_York" }).replace(" ", "T"),
-      endEt: endUtc.toLocaleString("sv-SE", { timeZone: "America/New_York" }).replace(" ", "T"),
-      currentStartTs,
-      candidates: ordered.slice(0, 10).map((v) => `btc-updown-5m-${v}`),
-    };
-  } catch {
-    return discoverBtc5mFromGammaProbe(currentStartTs);
   }
 }
 
