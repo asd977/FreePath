@@ -4,18 +4,20 @@ import { useMemo, useState } from "react";
 import { SectionHeading } from "@/components/common/section-heading";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
-import { QUICK_PLANS } from "@/config/defaults";
+import { DEFAULT_FINANCE_INPUTS, QUICK_PLANS } from "@/config/defaults";
 import { toReadableMonth } from "@/lib/date";
 import { estimateMonthToGoal } from "@/lib/finance";
+import { storage } from "@/lib/storage";
 import { formatCurrency } from "@/lib/utils";
 
 const targets = [1000000, 1250000, 1500000];
 
 export default function PlanPage() {
-  const [monthlyContribution, setMonthlyContribution] = useState(10000);
-  const principal = 300000;
-  const annualReturnRatePct = 6;
-  const startMonth = "2026-04";
+  const [initialInputs] = useState(() => storage.getFinanceInputs(DEFAULT_FINANCE_INPUTS));
+  const [monthlyContribution, setMonthlyContribution] = useState(initialInputs.monthlyContribution);
+  const principal = initialInputs.principal;
+  const annualReturnRatePct = initialInputs.annualReturnRate;
+  const startMonth = initialInputs.startMonth;
 
   const rows = useMemo(
     () =>
@@ -34,7 +36,7 @@ export default function PlanPage() {
           months: result.months,
         };
       }),
-    [monthlyContribution],
+    [annualReturnRatePct, monthlyContribution, principal, startMonth],
   );
 
   return (

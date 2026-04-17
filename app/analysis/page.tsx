@@ -1,9 +1,11 @@
 "use client";
 
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { SectionHeading } from "@/components/common/section-heading";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { DEFAULT_FINANCE_INPUTS } from "@/config/defaults";
 import { estimateMonthToGoal } from "@/lib/finance";
+import { storage } from "@/lib/storage";
 
 function SimpleCompareBars({ data }: { data: Array<{ name: string; months: number }> }) {
   const max = Math.max(...data.map((d) => d.months), 1);
@@ -26,31 +28,36 @@ function SimpleCompareBars({ data }: { data: Array<{ name: string; months: numbe
 }
 
 export default function AnalysisPage() {
+  const [baseInputs] = useState(() => storage.getFinanceInputs(DEFAULT_FINANCE_INPUTS));
+
   const comparisonData = useMemo(() => {
     const base = {
-      principal: 300000,
-      annualReturnRatePct: 6,
-      startMonth: "2026-04",
-      contributeAtMonthEnd: true,
-      targetPrincipal: 1200000,
+      principal: baseInputs.principal,
+      annualReturnRatePct: baseInputs.annualReturnRate,
+      startMonth: baseInputs.startMonth,
+      contributeAtMonthEnd: baseInputs.contributeAtMonthEnd,
+      targetPrincipal: Math.max((baseInputs.targetAnnualExpense - baseInputs.sideIncomeAnnual) / (baseInputs.safeWithdrawalRate / 100), 0),
     };
 
-    const monthlyOptions = [8000, 10000, 12000].map((v) => ({
-      name: `月存${v}`,
-      months: estimateMonthToGoal({ ...base, monthlyContribution: v }).months ?? 0,
-    }));
+    const monthlyOptions = [0.8, 1, 1.2].map((multiplier) => {
+      const monthlyContribution = Math.max(Math.round(baseInputs.monthlyContribution * multiplier), 0);
+      return {
+        name: `月存${monthlyContribution}`,
+        months: estimateMonthToGoal({ ...base, monthlyContribution }).months ?? 0,
+      };
+    });
 
     const incomeOptions = [0, 10000, 30000].map((sideIncome) => ({
       name: `副业${sideIncome}`,
       months: estimateMonthToGoal({
         ...base,
-        monthlyContribution: 10000,
-        targetPrincipal: Math.max((60000 - sideIncome) / 0.04, 0),
+        monthlyContribution: baseInputs.monthlyContribution,
+        targetPrincipal: Math.max((baseInputs.targetAnnualExpense - sideIncome) / (baseInputs.safeWithdrawalRate / 100), 0),
       }).months ?? 0,
     }));
 
     return { monthlyOptions, incomeOptions };
-  }, []);
+  }, [baseInputs]);
 
   return (
     <div className="space-y-6">

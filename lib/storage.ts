@@ -1,6 +1,7 @@
 import { STORAGE_KEYS } from "@/config/defaults";
 import { FinanceInputs } from "@/types/finance";
 import { MonthlyRecord } from "@/types/record";
+import { sanitizeFinanceInputs } from "@/lib/validation";
 
 function safeGet<T>(key: string, fallback: T): T {
   if (typeof window === "undefined") return fallback;
@@ -20,10 +21,11 @@ function safeSet<T>(key: string, value: T): void {
 
 export const storage = {
   getFinanceInputs(defaultValue: FinanceInputs): FinanceInputs {
-    return safeGet(STORAGE_KEYS.finance, defaultValue);
+    const stored = safeGet<Partial<FinanceInputs>>(STORAGE_KEYS.finance, defaultValue);
+    return sanitizeFinanceInputs({ ...defaultValue, ...stored });
   },
   setFinanceInputs(value: FinanceInputs): void {
-    safeSet(STORAGE_KEYS.finance, value);
+    safeSet(STORAGE_KEYS.finance, sanitizeFinanceInputs(value));
   },
   getRecords(): MonthlyRecord[] {
     return safeGet(STORAGE_KEYS.records, [] as MonthlyRecord[]);

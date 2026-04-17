@@ -88,20 +88,29 @@ export function generateProjectionSeries(params: {
   } = params;
 
   const points: ProjectionPoint[] = [];
-  for (let m = 0; m <= months; m += 1) {
+  const safeMonths = Math.max(Math.floor(months), 0);
+  const monthlyRate = annualReturnRatePct / 100 / 12;
+  let assets = principal;
+
+  for (let m = 0; m <= safeMonths; m += 1) {
     points.push({
       month: addMonths(startMonth, m),
-      assets: calculateAssetAtMonth({
-        principal,
-        monthlyContribution,
-        annualReturnRatePct,
-        months: m,
-        contributeAtMonthEnd,
-      }),
+      assets,
       target: targetPrincipal,
       isCurrent: m === 0,
     });
+
+    if (m === safeMonths) break;
+
+    if (!contributeAtMonthEnd) {
+      assets += monthlyContribution;
+    }
+    assets *= 1 + monthlyRate;
+    if (contributeAtMonthEnd) {
+      assets += monthlyContribution;
+    }
   }
+
   return points;
 }
 

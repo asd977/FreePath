@@ -45,11 +45,12 @@ export function ParameterForm({
       </CardHeader>
       <CardContent className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
         <Field label="当前本金">
-          <Input type="number" value={form.principal} onChange={(e) => setNumber("principal", e.target.value)} />
+          <Input type="number" min={0} value={form.principal} onChange={(e) => setNumber("principal", e.target.value)} />
         </Field>
         <Field label="每月存入金额">
           <Input
             type="number"
+            min={0}
             value={form.monthlyContribution}
             onChange={(e) => setNumber("monthlyContribution", e.target.value)}
           />
@@ -58,6 +59,8 @@ export function ParameterForm({
           <Input
             type="number"
             step="0.1"
+            min={-100}
+            max={100}
             value={form.annualReturnRate}
             onChange={(e) => setNumber("annualReturnRate", e.target.value)}
           />
@@ -66,6 +69,8 @@ export function ParameterForm({
           <Input
             type="number"
             step="0.1"
+            min={-100}
+            max={100}
             value={form.conservativeRate}
             onChange={(e) => setNumber("conservativeRate", e.target.value)}
           />
@@ -74,6 +79,8 @@ export function ParameterForm({
           <Input
             type="number"
             step="0.1"
+            min={-100}
+            max={100}
             value={form.neutralRate}
             onChange={(e) => setNumber("neutralRate", e.target.value)}
           />
@@ -82,6 +89,8 @@ export function ParameterForm({
           <Input
             type="number"
             step="0.1"
+            min={-100}
+            max={100}
             value={form.optimisticRate}
             onChange={(e) => setNumber("optimisticRate", e.target.value)}
           />
@@ -89,6 +98,7 @@ export function ParameterForm({
         <Field label="目标年支出">
           <Input
             type="number"
+            min={0}
             value={form.targetAnnualExpense}
             onChange={(e) => setNumber("targetAnnualExpense", e.target.value)}
           />
@@ -96,6 +106,7 @@ export function ParameterForm({
         <Field label="自由职业/副业年收入">
           <Input
             type="number"
+            min={0}
             value={form.sideIncomeAnnual}
             onChange={(e) => setNumber("sideIncomeAnnual", e.target.value)}
           />
@@ -104,6 +115,8 @@ export function ParameterForm({
           <Input
             type="number"
             step="0.1"
+            min={0.1}
+            max={100}
             value={form.safeWithdrawalRate}
             onChange={(e) => setNumber("safeWithdrawalRate", e.target.value)}
           />
