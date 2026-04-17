@@ -6,15 +6,17 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
+import { RecordType } from "@/types/record";
 
 type FormValues = {
   month: string;
   amount: number;
+  type: RecordType;
   note?: string;
 };
 
 export function MonthlyRecordForm({ onSubmit }: { onSubmit: (values: FormValues) => void }) {
-  const [values, setValues] = useState<FormValues>({ month: "", amount: 0, note: "" });
+  const [values, setValues] = useState<FormValues>({ month: "", amount: 0, type: "deposit", note: "" });
 
   return (
     <Card>
@@ -28,9 +30,20 @@ export function MonthlyRecordForm({ onSubmit }: { onSubmit: (values: FormValues)
             e.preventDefault();
             if (!values.month || values.amount < 0) return;
             onSubmit(values);
-            setValues({ month: "", amount: 0, note: "" });
+            setValues({ month: "", amount: 0, type: "deposit", note: "" });
           }}
         >
+          <div className="space-y-2">
+            <Label>类型</Label>
+            <select
+              className="h-10 w-full rounded-md border border-slate-200 bg-white px-3 text-sm text-slate-900 outline-none ring-slate-300 focus:ring-2"
+              value={values.type}
+              onChange={(e) => setValues((prev) => ({ ...prev, type: e.target.value as RecordType }))}
+            >
+              <option value="deposit">存入</option>
+              <option value="expense">支出</option>
+            </select>
+          </div>
           <div className="space-y-2">
             <Label>月份</Label>
             <Input
@@ -43,6 +56,7 @@ export function MonthlyRecordForm({ onSubmit }: { onSubmit: (values: FormValues)
             <Label>当月存入金额</Label>
             <Input
               type="number"
+              min={0}
               value={values.amount}
               onChange={(e) => setValues((prev) => ({ ...prev, amount: Number(e.target.value) || 0 }))}
             />

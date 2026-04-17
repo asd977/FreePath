@@ -9,6 +9,11 @@ type Props = {
 };
 
 export function MonthlyRecordList({ records, onDelete }: Props) {
+  const labels = {
+    deposit: "存入",
+    expense: "支出",
+  } as const;
+
   return (
     <Card>
       <CardHeader>
@@ -22,7 +27,21 @@ export function MonthlyRecordList({ records, onDelete }: Props) {
             <div key={record.id} className="flex items-start justify-between rounded-md border border-slate-200 p-3">
               <div className="space-y-1">
                 <p className="text-sm font-medium text-slate-900">{record.month}</p>
-                <p className="text-sm text-slate-700">{formatCurrency(record.amount)}</p>
+                <div className="flex items-center gap-2">
+                  <span
+                    className={
+                      record.type === "expense"
+                        ? "rounded px-2 py-0.5 text-xs bg-rose-100 text-rose-700"
+                        : "rounded px-2 py-0.5 text-xs bg-emerald-100 text-emerald-700"
+                    }
+                  >
+                    {labels[record.type]}
+                  </span>
+                  <p className={record.type === "expense" ? "text-sm text-rose-700" : "text-sm text-emerald-700"}>
+                    {record.type === "expense" ? "-" : "+"}
+                    {formatCurrency(record.amount)}
+                  </p>
+                </div>
                 {record.note ? <p className="text-xs text-slate-500">{record.note}</p> : null}
               </div>
               <Button variant="ghost" size="sm" onClick={() => onDelete(record.id)}>
