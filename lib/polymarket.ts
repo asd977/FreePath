@@ -7,6 +7,7 @@ const FIVE_MIN_MS = 5 * 60 * 1000;
 const SNAPSHOT_TTL_MS = 1800;
 const REQUEST_TIMEOUT_MS = 8000;
 const REQUEST_RETRY = 2;
+const POLYMARKET_PROXY_ENV_KEYS = ["POLYMARKET_PROXY_URL", "HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"] as const;
 
 type Cache = {
   key: string;
@@ -15,6 +16,37 @@ type Cache = {
 };
 
 let snapshotCache: Cache | null = null;
+let proxyDispatcherPromise: Promise<unknown | null> | null = null;
+
+function readProxyUrl(): string | null {
+  for (const key of POLYMARKET_PROXY_ENV_KEYS) {
+    const value = process.env[key]?.trim();
+    if (value) return value;
+  }
+  return null;
+}
+
+async function getProxyDispatcher(): Promise<unknown | null> {
+  if (proxyDispatcherPromise) return proxyDispatcherPromise;
+
+  const proxyUrl = readProxyUrl();
+  if (!proxyUrl) {
+    proxyDispatcherPromise = Promise.resolve(null);
+    return proxyDispatcherPromise;
+  }
+
+  proxyDispatcherPromise = (async () => {
+    try {
+      const { ProxyAgent } = await import("undici");
+      return new ProxyAgent(proxyUrl);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      throw new Error(`检测到代理 ${proxyUrl}，但初始化失败: ${detail}`);
+    }
+  })();
+
+  return proxyDispatcherPromise;
+}
 
 function parseJsonMaybe<T>(value: string | T[] | undefined): T[] {
   if (!value) return [];
@@ -65,6 +97,8 @@ export function currentWindowStartTs(nowMs = Date.now()): number {
 
 async function requestText(url: string, accept: string): Promise<string> {
   let lastError: Error | null = null;
+  const proxyDispatcher = await getProxyDispatcher();
+  const proxyUrl = readProxyUrl();
   for (let attempt = 0; attempt <= REQUEST_RETRY; attempt += 1) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
@@ -80,7 +114,8 @@ async function requestText(url: string, accept: string): Promise<string> {
         },
         cache: "no-store",
         signal: controller.signal,
-      });
+        ...(proxyDispatcher ? { dispatcher: proxyDispatcher } : {}),
+      } as RequestInit & { dispatcher?: unknown });
 
       if (!response.ok) {
         const body = (await response.text()).slice(0, 180).replace(/\s+/g, " ").trim();
@@ -90,7 +125,8 @@ async function requestText(url: string, accept: string): Promise<string> {
       return response.text();
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error);
-      lastError = new Error(`请求失败 ${new URL(url).host} (attempt ${attempt + 1}/${REQUEST_RETRY + 1}): ${reason}`);
+      const proxyHint = proxyUrl ? `, proxy=${proxyUrl}` : "";
+      lastError = new Error(`请求失败 ${new URL(url).host} (attempt ${attempt + 1}/${REQUEST_RETRY + 1}${proxyHint}): ${reason}`);
       if (attempt < REQUEST_RETRY) {
         await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)));
       }
