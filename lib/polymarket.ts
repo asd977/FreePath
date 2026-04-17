@@ -5,6 +5,8 @@ const USER_AGENT =
 
 const FIVE_MIN_MS = 5 * 60 * 1000;
 const SNAPSHOT_TTL_MS = 1800;
+const REQUEST_TIMEOUT_MS = 8000;
+const REQUEST_RETRY = 2;
 
 type Cache = {
   key: string;
@@ -62,20 +64,42 @@ export function currentWindowStartTs(nowMs = Date.now()): number {
 }
 
 async function requestText(url: string, accept: string): Promise<string> {
-  const response = await fetch(url, {
-    method: "GET",
-    headers: {
-      "User-Agent": USER_AGENT,
-      Accept: accept,
-      "Accept-Language": "en-US,en;q=0.9",
-      "Cache-Control": "no-cache",
-      Pragma: "no-cache",
-    },
-    cache: "no-store",
-  });
+  let lastError: Error | null = null;
+  for (let attempt = 0; attempt <= REQUEST_RETRY; attempt += 1) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), REQUEST_TIMEOUT_MS);
+    try {
+      const response = await fetch(url, {
+        method: "GET",
+        headers: {
+          "User-Agent": USER_AGENT,
+          Accept: accept,
+          "Accept-Language": "en-US,en;q=0.9",
+          "Cache-Control": "no-cache",
+          Pragma: "no-cache",
+        },
+        cache: "no-store",
+        signal: controller.signal,
+      });
 
-  if (!response.ok) throw new Error(`HTTP ${response.status}`);
-  return response.text();
+      if (!response.ok) {
+        const body = (await response.text()).slice(0, 180).replace(/\s+/g, " ").trim();
+        throw new Error(`上游返回 HTTP ${response.status} (${new URL(url).host})${body ? `: ${body}` : ""}`);
+      }
+
+      return response.text();
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
+      lastError = new Error(`请求失败 ${new URL(url).host} (attempt ${attempt + 1}/${REQUEST_RETRY + 1}): ${reason}`);
+      if (attempt < REQUEST_RETRY) {
+        await new Promise((resolve) => setTimeout(resolve, 250 * (attempt + 1)));
+      }
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  throw lastError ?? new Error(`请求失败 ${new URL(url).host}`);
 }
 
 async function requestJson<T>(url: string): Promise<T> {
