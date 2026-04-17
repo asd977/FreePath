@@ -1,6 +1,5 @@
 "use client";
 
-import { zodResolver } from "@hookform/resolvers/zod";
 import { useEffect } from "react";
 import { useForm, useWatch } from "react-hook-form";
 import { z } from "zod";
@@ -41,7 +40,6 @@ const numberReg = { valueAsNumber: true } as const;
 
 export function ParameterForm({ defaultValues, onChange }: { defaultValues: FinanceInputs; onChange: (values: FinanceInputs) => void }) {
   const form = useForm<FormValues>({
-    resolver: zodResolver(schema),
     defaultValues,
     mode: "onChange",
   });

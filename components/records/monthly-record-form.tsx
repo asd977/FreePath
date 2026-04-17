@@ -2,7 +2,6 @@
 
 import { useForm } from "react-hook-form";
 import { z } from "zod";
-import { zodResolver } from "@hookform/resolvers/zod";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -19,7 +18,6 @@ type FormValues = z.infer<typeof schema>;
 
 export function MonthlyRecordForm({ onSubmit }: { onSubmit: (values: FormValues) => void }) {
   const form = useForm<FormValues>({
-    resolver: zodResolver(schema),
     defaultValues: { month: "", amount: 0, note: "" },
   });
 
@@ -32,7 +30,9 @@ export function MonthlyRecordForm({ onSubmit }: { onSubmit: (values: FormValues)
         <form
           className="grid gap-4"
           onSubmit={form.handleSubmit((values) => {
-            onSubmit(values);
+            const parsed = schema.safeParse(values);
+            if (!parsed.success) return;
+            onSubmit(parsed.data);
             form.reset({ month: "", amount: 0, note: "" });
           })}
         >
