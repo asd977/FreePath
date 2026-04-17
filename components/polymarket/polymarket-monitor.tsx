@@ -60,6 +60,10 @@ function markPrice(side: Side, snapshot: PolymarketSnapshotResponse | null) {
   return quote.mid ?? quote.bid ?? quote.ask;
 }
 
+function referencePrice(side: Side, snapshot: PolymarketSnapshotResponse | null) {
+  return markPrice(side, snapshot);
+}
+
 function bestAsk(side: Side, snapshot: PolymarketSnapshotResponse | null) {
   if (!snapshot) return null;
   return side === "UP" ? snapshot.prices.up.ask ?? snapshot.prices.up.mid : snapshot.prices.down.ask ?? snapshot.prices.down.mid;
@@ -77,7 +81,7 @@ function secsLeft(snapshot: PolymarketSnapshotResponse | null) {
 
 function upDownFromSnapshot(snapshot: PolymarketSnapshotResponse | null) {
   if (!snapshot) return { up: null, down: null };
-  return { up: snapshot.prices.up.mid, down: snapshot.prices.down.mid };
+  return { up: referencePrice("UP", snapshot), down: referencePrice("DOWN", snapshot) };
 }
 
 function loadStrategies(): StrategyState[] {
@@ -155,7 +159,7 @@ function isMicroRebound(history: PriceTick[], side: Side): boolean {
 }
 
 function runEntryRule(strategy: StrategyState, history: PriceTick[], snapshot: PolymarketSnapshotResponse): { side: Side; reason: string } | null {
-  if (history.length < 10) return null;
+  if (history.length < 6) return null;
 
   const upDropFast = historyDrop(history, "UP", 4);
   const downDropFast = historyDrop(history, "DOWN", 4);
@@ -168,7 +172,7 @@ function runEntryRule(strategy: StrategyState, history: PriceTick[], snapshot: P
       const side = pickByLargestDrop(upDropFast, downDropFast);
       const sideMid = side === "UP" ? current.up : current.down;
       const drop = side === "UP" ? upDropFast : downDropFast;
-      if (sideMid !== null && sideMid < 0.48 && sideMid > 0.12 && drop >= 0.045) {
+      if (sideMid !== null && sideMid < 0.53 && sideMid > 0.1 && drop >= 0.03) {
         return { side, reason: `急跌${drop.toFixed(3)}后抄底` };
       }
       return null;
@@ -179,9 +183,9 @@ function runEntryRule(strategy: StrategyState, history: PriceTick[], snapshot: P
       if (
         upAsk !== null &&
         downAsk !== null &&
-        upDropFast >= 0.03 &&
-        downDropFast >= 0.03 &&
-        upAsk + downAsk <= 0.96
+        upDropFast >= 0.02 &&
+        downDropFast >= 0.02 &&
+        upAsk + downAsk <= 0.985
       ) {
         const side: Side = upAsk <= downAsk ? "UP" : "DOWN";
         return { side, reason: `双边塌缩，选更便宜${side}` };
@@ -192,7 +196,7 @@ function runEntryRule(strategy: StrategyState, history: PriceTick[], snapshot: P
       const side = pickByLargestDrop(upDropSlow, downDropSlow);
       const sideMid = side === "UP" ? current.up : current.down;
       const deepDrop = side === "UP" ? upDropSlow : downDropSlow;
-      if (sideMid !== null && sideMid < 0.4 && deepDrop >= 0.075 && isMicroRebound(history, side)) {
+      if (sideMid !== null && sideMid < 0.45 && deepDrop >= 0.05 && isMicroRebound(history, side)) {
         return { side, reason: `超跌${deepDrop.toFixed(3)}后止跌回弹` };
       }
       return null;
@@ -269,8 +273,8 @@ export function PolymarketMonitor() {
       ...historyRef.current,
       {
         ts: Date.now(),
-        upMid: snapshot.prices.up.mid,
-        downMid: snapshot.prices.down.mid,
+        upMid: referencePrice("UP", snapshot),
+        downMid: referencePrice("DOWN", snapshot),
         upAsk: snapshot.prices.up.ask,
         downAsk: snapshot.prices.down.ask,
         upBid: snapshot.prices.up.bid,
