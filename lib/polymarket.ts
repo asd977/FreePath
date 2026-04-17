@@ -1,5 +1,5 @@
 import { PolymarketBook, PolymarketDiscoverResponse, PolymarketMarketRaw, PolymarketSnapshotResponse, SidePrice } from "@/types/polymarket";
-import { ProxyAgent } from "undici";
+import { ProxyAgent, request } from "undici";
 
 const USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36";
@@ -17,12 +17,22 @@ type Cache = {
 
 let snapshotCache: Cache | null = null;
 let proxyAgent: ProxyAgent | null | undefined;
+let proxyUrlCache: string | null | undefined;
 
 function getProxyAgent() {
   if (proxyAgent !== undefined) return proxyAgent;
   const proxyUrl = process.env.POLYMARKET_PROXY_URL || process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
+  proxyUrlCache = proxyUrl || null;
   proxyAgent = proxyUrl ? new ProxyAgent(proxyUrl) : null;
   return proxyAgent;
+}
+
+export function getPolymarketProxyInfo() {
+  const agent = getProxyAgent();
+  return {
+    enabled: Boolean(agent),
+    url: proxyUrlCache,
+  };
 }
 
 async function sleep(ms: number) {
@@ -83,24 +93,23 @@ async function requestText(url: string, accept: string): Promise<string> {
 
   for (let attempt = 1; attempt <= RETRY_COUNT; attempt += 1) {
     try {
-      const response = await fetch(url, {
+      const response = await request(url, {
         method: "GET",
         headers: {
           "User-Agent": USER_AGENT,
-          Accept: accept,
+          accept,
           "Accept-Language": "en-US,en;q=0.9",
           "Cache-Control": "no-cache",
           Pragma: "no-cache",
         },
-        cache: "no-store",
-        ...(agent ? { dispatcher: agent } : {}),
+        ...(agent ? { dispatcher: agent } : undefined),
       });
 
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
+      if (response.statusCode >= 400) {
+        throw new Error(`HTTP ${response.statusCode}`);
       }
 
-      return response.text();
+      return response.body.text();
     } catch (error) {
       lastError = error instanceof Error ? error.message : String(error);
       if (attempt < RETRY_COUNT) {

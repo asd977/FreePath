@@ -82,7 +82,8 @@ export function PolymarketMonitor() {
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = (await res.json()) as PolymarketSnapshotResponse;
       setSnapshot(data);
-      setProxyStatus("可用");
+      const proxyHeader = res.headers.get("X-Polymarket-Proxy");
+      setProxyStatus(proxyHeader === "enabled" ? "可用（已走代理）" : "可用（未配置代理）");
     } catch (error) {
       setProxyStatus("不可用");
       pushLog(`刷新失败：${error instanceof Error ? error.message : String(error)}`);
