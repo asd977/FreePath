@@ -26,4 +26,5 @@ export const QUICK_PLANS: QuickPlanOption[] = [
 export const STORAGE_KEYS = {
   finance: "freepath.finance.inputs",
   records: "freepath.records.monthly",
+  marketCodes: "freepath.market.codes",
 };

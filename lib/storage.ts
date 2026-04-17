@@ -33,6 +33,12 @@ export const storage = {
   setRecords(value: MonthlyRecord[]): void {
     safeSet(STORAGE_KEYS.records, value);
   },
+  getMarketCodes(): string[] {
+    return safeGet(STORAGE_KEYS.marketCodes, [] as string[]);
+  },
+  setMarketCodes(value: string[]): void {
+    safeSet(STORAGE_KEYS.marketCodes, value);
+  },
   clearAll(): void {
     if (typeof window === "undefined") return;
     Object.values(STORAGE_KEYS).forEach((k) => window.localStorage.removeItem(k));

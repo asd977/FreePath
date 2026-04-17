@@ -9,6 +9,9 @@ import { calculateScenarioResults, evaluatePlan } from "@/lib/finance";
 import { storage } from "@/lib/storage";
 import { formatCurrency, formatPercent } from "@/lib/utils";
 import { MonthlyRecord } from "@/types/record";
+import { Button } from "@/components/ui/button";
+import { Textarea } from "@/components/ui/textarea";
+import { MarketAnalysisResponse, MarketRecommendation } from "@/types/market";
 
 function normalizeRecords(records: MonthlyRecord[]): MonthlyRecord[] {
   return records.map((record) => ({
@@ -51,9 +54,23 @@ function ScenarioBars({ rows }: { rows: Array<{ label: string; months: number | 
   );
 }
 
+function recommendationLabel(type: MarketRecommendation): { text: string; className: string } {
+  if (type === "buy") return { text: "偏买入", className: "bg-emerald-100 text-emerald-700" };
+  if (type === "sell") return { text: "偏卖出", className: "bg-rose-100 text-rose-700" };
+  return { text: "观望", className: "bg-slate-100 text-slate-700" };
+}
+
+function numberOrDash(value: number | null, digits = 2, suffix = "") {
+  if (value === null || !Number.isFinite(value)) return "-";
+  return `${value.toFixed(digits)}${suffix}`;
+}
+
 export default function AnalysisPage() {
   const [baseInputs] = useState(() => storage.getFinanceInputs(DEFAULT_FINANCE_INPUTS));
   const [records] = useState(() => normalizeRecords(storage.getRecords() as MonthlyRecord[]));
+  const [marketCodes, setMarketCodes] = useState(() => storage.getMarketCodes().join("\n") || "SH000300\nSH510300\nSZ159915\nSH600519");
+  const [marketData, setMarketData] = useState<MarketAnalysisResponse | null>(null);
+  const [loading, setLoading] = useState(false);
 
   const analysis = useMemo(() => {
     const plan = evaluatePlan(baseInputs);
@@ -81,6 +98,27 @@ export default function AnalysisPage() {
 
     return { plan, scenarios, monthlySeries, avgDeposit, avgExpense, avgNet, savingsRate, runwayMonths };
   }, [baseInputs, records]);
+
+  async function runMarketAnalysis() {
+    const codes = marketCodes
+      .split(/[\n,，;；\s]+/)
+      .map((item) => item.trim())
+      .filter(Boolean);
+
+    storage.setMarketCodes(codes);
+    setLoading(true);
+    try {
+      const res = await fetch("/api/market/analyze", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ codes }),
+      });
+      const data = (await res.json()) as MarketAnalysisResponse;
+      setMarketData(data);
+    } finally {
+      setLoading(false);
+    }
+  }
 
   return (
     <div className="space-y-6">
@@ -116,6 +154,67 @@ export default function AnalysisPage() {
         </CardHeader>
         <CardContent>
           <ScenarioBars rows={analysis.scenarios} />
+        </CardContent>
+      </Card>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>指数 / ETF / 股票分析（新增）</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <p className="text-sm text-slate-600">支持手动输入代码（如 SH000300、SH510300、SZ159915、SH600519），系统会自动抓取免费行情并给出多指标信号。</p>
+          <Textarea value={marketCodes} onChange={(e) => setMarketCodes(e.target.value)} className="min-h-28" />
+          <Button onClick={runMarketAnalysis} disabled={loading}>
+            {loading ? "分析中..." : "获取并分析"}
+          </Button>
+
+          {marketData?.failed?.length ? (
+            <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-700">
+              {marketData.failed.map((item) => (
+                <p key={`${item.code}-${item.reason}`}>{item.code}：{item.reason}</p>
+              ))}
+            </div>
+          ) : null}
+
+          <div className="space-y-3">
+            {marketData?.items.map((item) => {
+              const rec = recommendationLabel(item.recommendation);
+              return (
+                <div key={`${item.code}-${item.fetchedAt}`} className="rounded-lg border border-slate-200 p-4">
+                  <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <p className="text-sm text-slate-500">{item.code} · {item.name}</p>
+                      <p className="text-lg font-semibold text-slate-900">{numberOrDash(item.latestPrice)} ({numberOrDash(item.dayChangePct, 2, "%")})</p>
+                    </div>
+                    <span className={`rounded-full px-3 py-1 text-xs font-semibold ${rec.className}`}>{rec.text}（评分 {item.score}）</span>
+                  </div>
+
+                  <div className="grid gap-2 text-sm text-slate-700 md:grid-cols-2 xl:grid-cols-3">
+                    <p>MA20 / MA60 / MA120：{numberOrDash(item.indicators.ma20)} / {numberOrDash(item.indicators.ma60)} / {numberOrDash(item.indicators.ma120)}</p>
+                    <p>RSI14：{numberOrDash(item.indicators.rsi14)}</p>
+                    <p>MACD柱：{numberOrDash(item.indicators.macdHistogram, 3)}</p>
+                    <p>布林位置：{numberOrDash(item.indicators.bollingerPosition, 2)}</p>
+                    <p>1M / 3M / 6M：{numberOrDash(item.indicators.change1mPct, 2, "%")} / {numberOrDash(item.indicators.change3mPct, 2, "%")} / {numberOrDash(item.indicators.change6mPct, 2, "%")}</p>
+                    <p>20日年化波动：{numberOrDash(item.indicators.annualizedVolatility20d, 2, "%")}</p>
+                    <p>近1年最大回撤：{numberOrDash(item.indicators.maxDrawdown1yPct, 2, "%")}</p>
+                    <p>价格分位(1Y/3Y/5Y)：{numberOrDash(item.indicators.percentile1y, 1, "%")} / {numberOrDash(item.indicators.percentile3y, 1, "%")} / {numberOrDash(item.indicators.percentile5y, 1, "%")}</p>
+                    <p>PE(TTM)：{numberOrDash(item.valuation.peTtm)}</p>
+                    <p>PB：{numberOrDash(item.valuation.pb)}</p>
+                    <p>PE历史分位：{numberOrDash(item.valuation.pePercentile5y, 1, "%")}</p>
+                  </div>
+
+                  {item.reasons.length ? (
+                    <ul className="mt-3 list-disc space-y-1 pl-5 text-sm text-slate-600">
+                      {item.reasons.map((reason) => (
+                        <li key={reason}>{reason}</li>
+                      ))}
+                    </ul>
+                  ) : null}
+                  {item.valuation.note ? <p className="mt-3 text-xs text-slate-500">说明：{item.valuation.note}</p> : null}
+                </div>
+              );
+            })}
+          </div>
         </CardContent>
       </Card>
     </div>
