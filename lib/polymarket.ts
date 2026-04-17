@@ -21,7 +21,12 @@ let proxyUrlCache: string | null | undefined;
 
 function getProxyAgent() {
   if (proxyAgent !== undefined) return proxyAgent;
-  const proxyUrl = process.env.POLYMARKET_PROXY_URL || process.env.HTTPS_PROXY || process.env.HTTP_PROXY;
+  const proxyUrl =
+    process.env.POLYMARKET_PROXY_URL ||
+    process.env.HTTPS_PROXY ||
+    process.env.https_proxy ||
+    process.env.HTTP_PROXY ||
+    process.env.http_proxy;
   proxyUrlCache = proxyUrl || null;
   proxyAgent = proxyUrl ? new ProxyAgent(proxyUrl) : null;
   return proxyAgent;

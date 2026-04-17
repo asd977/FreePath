@@ -5,10 +5,10 @@ export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 export async function GET(request: NextRequest) {
+  const proxyInfo = getPolymarketProxyInfo();
   try {
     const force = request.nextUrl.searchParams.get("force") === "1";
     const data = await loadPolymarketSnapshot(force);
-    const proxyInfo = getPolymarketProxyInfo();
     return NextResponse.json(data, {
       headers: {
         "Cache-Control": "no-store",
@@ -20,8 +20,15 @@ export async function GET(request: NextRequest) {
       {
         ok: false,
         error: error instanceof Error ? error.message : "unknown error",
+        proxyEnabled: proxyInfo.enabled,
+        proxyUrl: proxyInfo.url,
       },
-      { status: 502 },
+      {
+        status: 502,
+        headers: {
+          "X-Polymarket-Proxy": proxyInfo.enabled ? "enabled" : "disabled",
+        },
+      },
     );
   }
 }

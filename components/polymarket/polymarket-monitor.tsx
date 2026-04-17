@@ -79,7 +79,18 @@ export function PolymarketMonitor() {
   const refreshSnapshot = useCallback(async (force = false) => {
     try {
       const res = await fetch(`/api/polymarket/snapshot${force ? "?force=1" : ""}`, { cache: "no-store" });
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      if (!res.ok) {
+        const raw = await res.text();
+        let detail = raw;
+        try {
+          const parsed = JSON.parse(raw) as { error?: string; proxyEnabled?: boolean; proxyUrl?: string | null };
+          const proxy = parsed.proxyEnabled ? `，代理=${parsed.proxyUrl || "已启用"}` : "，代理=未启用";
+          detail = `${parsed.error || raw}${proxy}`;
+        } catch {
+          // keep raw
+        }
+        throw new Error(`HTTP ${res.status} - ${detail}`);
+      }
       const data = (await res.json()) as PolymarketSnapshotResponse;
       setSnapshot(data);
       const proxyHeader = res.headers.get("X-Polymarket-Proxy");
