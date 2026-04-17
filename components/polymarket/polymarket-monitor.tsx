@@ -1,35 +1,73 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { PolymarketSnapshotResponse } from "@/types/polymarket";
 
-type Position = { qty: number; avg: number };
-type AccountState = {
-  cash: number;
-  realized: number;
-  positions: {
-    UP: Position;
-    DOWN: Position;
-  };
+type Side = "UP" | "DOWN";
+
+type Position = {
+  side: Side;
+  qty: number;
+  entry: number;
+  spent: number;
+  openedAt: number;
+  entryReason: string;
 };
 
-const STORAGE_KEY = "freepath_polymarket_account_v1";
+type StrategyState = {
+  id: string;
+  name: string;
+  description: string;
+  cash: number;
+  realized: number;
+  trades: number;
+  wins: number;
+  losses: number;
+  position: Position | null;
+  lastAction: string;
+};
+
+type PriceTick = {
+  ts: number;
+  upMid: number | null;
+  downMid: number | null;
+  upAsk: number | null;
+  downAsk: number | null;
+  upBid: number | null;
+  downBid: number | null;
+  slug: string;
+};
+
+const INITIAL_CASH = 10;
+const ORDER_SIZE = 1;
+const FLAT_BEFORE_SECONDS = 25;
+const STORAGE_KEY = "freepath_polymarket_3strategy_v1";
 
 function formatPrice(value: number | null, digits = 3): string {
   if (value === null || !Number.isFinite(value)) return "-";
   return value.toFixed(digits);
 }
 
-function formatMoney(value: number): string {
-  return `$${value.toFixed(2)}`;
+function formatUnits(value: number): string {
+  return value.toFixed(3);
 }
 
-function markPrice(side: "UP" | "DOWN", snapshot: PolymarketSnapshotResponse | null) {
+function markPrice(side: Side, snapshot: PolymarketSnapshotResponse | null) {
   if (!snapshot) return null;
   const quote = side === "UP" ? snapshot.prices.up : snapshot.prices.down;
   return quote.mid ?? quote.bid ?? quote.ask;
+}
+
+function bestAsk(side: Side, snapshot: PolymarketSnapshotResponse | null) {
+  if (!snapshot) return null;
+  return side === "UP" ? snapshot.prices.up.ask ?? snapshot.prices.up.mid : snapshot.prices.down.ask ?? snapshot.prices.down.mid;
+}
+
+function bestBid(side: Side, snapshot: PolymarketSnapshotResponse | null) {
+  if (!snapshot) return null;
+  return side === "UP" ? snapshot.prices.up.bid ?? snapshot.prices.up.mid : snapshot.prices.down.bid ?? snapshot.prices.down.mid;
 }
 
 function secsLeft(snapshot: PolymarketSnapshotResponse | null) {
@@ -37,59 +75,174 @@ function secsLeft(snapshot: PolymarketSnapshotResponse | null) {
   return Math.max(0, Math.floor((Date.parse(snapshot.market.endDate) - Date.now()) / 1000));
 }
 
-function loadAccount(): AccountState {
-  if (typeof window === "undefined") {
-    return { cash: 1000, realized: 0, positions: { UP: { qty: 0, avg: 0 }, DOWN: { qty: 0, avg: 0 } } };
-  }
+function upDownFromSnapshot(snapshot: PolymarketSnapshotResponse | null) {
+  if (!snapshot) return { up: null, down: null };
+  return { up: snapshot.prices.up.mid, down: snapshot.prices.down.mid };
+}
+
+function loadStrategies(): StrategyState[] {
+  const defaults: StrategyState[] = [
+    {
+      id: "flash-drop",
+      name: "策略A：急跌抄底",
+      description: "8-12秒内塌缩明显才入场，优先抄底跌幅更大的那一边。",
+      cash: INITIAL_CASH,
+      realized: 0,
+      trades: 0,
+      wins: 0,
+      losses: 0,
+      position: null,
+      lastAction: "等待塌缩信号",
+    },
+    {
+      id: "double-shock",
+      name: "策略B：双边塌缩",
+      description: "当UP和DOWN同时塌缩时，只买更便宜的一边，偏防守。",
+      cash: INITIAL_CASH,
+      realized: 0,
+      trades: 0,
+      wins: 0,
+      losses: 0,
+      position: null,
+      lastAction: "等待双塌缩",
+    },
+    {
+      id: "oversold-rebound",
+      name: "策略C：超跌回弹",
+      description: "先等深度塌缩，再等1-2跳止跌反弹确认后再买。",
+      cash: INITIAL_CASH,
+      realized: 0,
+      trades: 0,
+      wins: 0,
+      losses: 0,
+      position: null,
+      lastAction: "等待超跌+止跌",
+    },
+  ];
+
+  if (typeof window === "undefined") return defaults;
 
   try {
     const raw = window.localStorage.getItem(STORAGE_KEY);
-    if (!raw) throw new Error("empty");
-    const parsed = JSON.parse(raw) as AccountState;
-    if (typeof parsed.cash === "number" && typeof parsed.realized === "number") {
-      return parsed;
-    }
+    if (!raw) return defaults;
+    const parsed = JSON.parse(raw) as StrategyState[];
+    if (!Array.isArray(parsed) || parsed.length !== defaults.length) return defaults;
+    return defaults.map((base, idx) => ({ ...base, ...parsed[idx], id: base.id, name: base.name, description: base.description }));
   } catch {
-    // noop
+    return defaults;
   }
+}
 
-  return { cash: 1000, realized: 0, positions: { UP: { qty: 0, avg: 0 }, DOWN: { qty: 0, avg: 0 } } };
+function pickByLargestDrop(upDrop: number, downDrop: number): Side {
+  return upDrop >= downDrop ? "UP" : "DOWN";
+}
+
+function historyDrop(history: PriceTick[], side: Side, lookbackTicks: number): number {
+  if (history.length <= lookbackTicks) return 0;
+  const current = side === "UP" ? history[history.length - 1].upMid : history[history.length - 1].downMid;
+  const old = side === "UP" ? history[history.length - 1 - lookbackTicks].upMid : history[history.length - 1 - lookbackTicks].downMid;
+  if (current === null || old === null) return 0;
+  return old - current;
+}
+
+function isMicroRebound(history: PriceTick[], side: Side): boolean {
+  if (history.length < 4) return false;
+  const a = side === "UP" ? history[history.length - 1].upMid : history[history.length - 1].downMid;
+  const b = side === "UP" ? history[history.length - 2].upMid : history[history.length - 2].downMid;
+  const c = side === "UP" ? history[history.length - 3].upMid : history[history.length - 3].downMid;
+  if (a === null || b === null || c === null) return false;
+  return c <= b && a > b;
+}
+
+function runEntryRule(strategy: StrategyState, history: PriceTick[], snapshot: PolymarketSnapshotResponse): { side: Side; reason: string } | null {
+  if (history.length < 10) return null;
+
+  const upDropFast = historyDrop(history, "UP", 4);
+  const downDropFast = historyDrop(history, "DOWN", 4);
+  const upDropSlow = historyDrop(history, "UP", 8);
+  const downDropSlow = historyDrop(history, "DOWN", 8);
+  const current = upDownFromSnapshot(snapshot);
+
+  switch (strategy.id) {
+    case "flash-drop": {
+      const side = pickByLargestDrop(upDropFast, downDropFast);
+      const sideMid = side === "UP" ? current.up : current.down;
+      const drop = side === "UP" ? upDropFast : downDropFast;
+      if (sideMid !== null && sideMid < 0.48 && sideMid > 0.12 && drop >= 0.045) {
+        return { side, reason: `急跌${drop.toFixed(3)}后抄底` };
+      }
+      return null;
+    }
+    case "double-shock": {
+      const upAsk = bestAsk("UP", snapshot);
+      const downAsk = bestAsk("DOWN", snapshot);
+      if (
+        upAsk !== null &&
+        downAsk !== null &&
+        upDropFast >= 0.03 &&
+        downDropFast >= 0.03 &&
+        upAsk + downAsk <= 0.96
+      ) {
+        const side: Side = upAsk <= downAsk ? "UP" : "DOWN";
+        return { side, reason: `双边塌缩，选更便宜${side}` };
+      }
+      return null;
+    }
+    case "oversold-rebound": {
+      const side = pickByLargestDrop(upDropSlow, downDropSlow);
+      const sideMid = side === "UP" ? current.up : current.down;
+      const deepDrop = side === "UP" ? upDropSlow : downDropSlow;
+      if (sideMid !== null && sideMid < 0.4 && deepDrop >= 0.075 && isMicroRebound(history, side)) {
+        return { side, reason: `超跌${deepDrop.toFixed(3)}后止跌回弹` };
+      }
+      return null;
+    }
+    default:
+      return null;
+  }
+}
+
+function maxHoldSeconds(strategyId: string): number {
+  if (strategyId === "flash-drop") return 35;
+  if (strategyId === "double-shock") return 45;
+  return 55;
+}
+
+function takeProfit(strategyId: string): number {
+  if (strategyId === "flash-drop") return 0.06;
+  if (strategyId === "double-shock") return 0.045;
+  return 0.07;
+}
+
+function stopLoss(strategyId: string): number {
+  if (strategyId === "flash-drop") return -0.035;
+  if (strategyId === "double-shock") return -0.025;
+  return -0.04;
 }
 
 export function PolymarketMonitor() {
   const [snapshot, setSnapshot] = useState<PolymarketSnapshotResponse | null>(null);
-  const [account, setAccount] = useState<AccountState>(() => loadAccount());
-  const [tradeUsd, setTradeUsd] = useState(25);
-  const [slip, setSlip] = useState(0.01);
-  const [threshold, setThreshold] = useState(0.03);
-  const [flatBefore, setFlatBefore] = useState(25);
-  const [auto, setAuto] = useState(false);
+  const [strategies, setStrategies] = useState<StrategyState[]>(() => loadStrategies());
+  const [auto, setAuto] = useState(true);
   const [proxyStatus, setProxyStatus] = useState("连接中...");
   const [logs, setLogs] = useState<string[]>([]);
+  const historyRef = useRef<PriceTick[]>([]);
 
   const pushLog = useCallback((msg: string) => {
     const time = new Date().toLocaleTimeString("zh-CN", { hour12: false });
-    setLogs((prev) => [`[${time}] ${msg}`, ...prev].slice(0, 120));
+    setLogs((prev) => [`[${time}] ${msg}`, ...prev].slice(0, 200));
   }, []);
 
   useEffect(() => {
-    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(account));
-  }, [account]);
+    window.localStorage.setItem(STORAGE_KEY, JSON.stringify(strategies));
+  }, [strategies]);
 
   const refreshSnapshot = useCallback(async (force = false) => {
     try {
       const res = await fetch(`/api/polymarket/snapshot${force ? "?force=1" : ""}`, { cache: "no-store" });
       if (!res.ok) {
         const raw = await res.text();
-        let detail = raw;
-        try {
-          const parsed = JSON.parse(raw) as { error?: string; proxyEnabled?: boolean; proxyUrl?: string | null };
-          const proxy = parsed.proxyEnabled ? `，代理=${parsed.proxyUrl || "已启用"}` : "，代理=未启用";
-          detail = `${parsed.error || raw}${proxy}`;
-        } catch {
-          // keep raw
-        }
-        throw new Error(`HTTP ${res.status} - ${detail}`);
+        throw new Error(`HTTP ${res.status} - ${raw}`);
       }
       const data = (await res.json()) as PolymarketSnapshotResponse;
       setSnapshot(data);
@@ -101,81 +254,6 @@ export function PolymarketMonitor() {
     }
   }, [pushLog]);
 
-  const inventoryValue = useMemo(() => {
-    const up = (markPrice("UP", snapshot) ?? 0) * account.positions.UP.qty;
-    const down = (markPrice("DOWN", snapshot) ?? 0) * account.positions.DOWN.qty;
-    return up + down;
-  }, [account.positions.DOWN.qty, account.positions.UP.qty, snapshot]);
-
-  const unrealized = useMemo(() => {
-    const upMark = markPrice("UP", snapshot);
-    const downMark = markPrice("DOWN", snapshot);
-
-    let value = 0;
-    if (upMark !== null && account.positions.UP.qty > 0) {
-      value += (upMark - account.positions.UP.avg) * account.positions.UP.qty;
-    }
-    if (downMark !== null && account.positions.DOWN.qty > 0) {
-      value += (downMark - account.positions.DOWN.avg) * account.positions.DOWN.qty;
-    }
-    return value;
-  }, [account.positions.DOWN, account.positions.UP, snapshot]);
-
-  const buySide = useCallback(
-    (side: "UP" | "DOWN") => {
-      if (!snapshot) return;
-      const quote = side === "UP" ? snapshot.prices.up : snapshot.prices.down;
-      const ask = quote.ask ?? quote.mid;
-      if (!ask) return pushLog(`买入 ${side} 失败：没有 ask`);
-      if (tradeUsd > account.cash) return pushLog(`买入 ${side} 失败：现金不足`);
-
-      const px = Math.min(0.999, ask + slip);
-      const qty = tradeUsd / px;
-      setAccount((prev) => {
-        const current = prev.positions[side];
-        const nextQty = current.qty + qty;
-        const avg = nextQty > 0 ? (current.avg * current.qty + qty * px) / nextQty : 0;
-        return {
-          ...prev,
-          cash: prev.cash - tradeUsd,
-          positions: {
-            ...prev.positions,
-            [side]: { qty: nextQty, avg },
-          },
-        };
-      });
-      pushLog(`买入 ${side}: ${formatMoney(tradeUsd)} @ ${px.toFixed(3)} -> ${qty.toFixed(4)} 股`);
-    },
-    [account.cash, pushLog, slip, snapshot, tradeUsd],
-  );
-
-  const sellAll = useCallback(
-    (side: "UP" | "DOWN") => {
-      if (!snapshot) return;
-      const quote = side === "UP" ? snapshot.prices.up : snapshot.prices.down;
-      const bid = quote.bid ?? quote.mid;
-      const pos = account.positions[side];
-
-      if (pos.qty <= 0) return pushLog(`卖出 ${side}：无持仓`);
-      if (!bid) return pushLog(`卖出 ${side} 失败：没有 bid`);
-
-      const proceeds = bid * pos.qty;
-      const pnl = (bid - pos.avg) * pos.qty;
-
-      setAccount((prev) => ({
-        ...prev,
-        cash: prev.cash + proceeds,
-        realized: prev.realized + pnl,
-        positions: {
-          ...prev.positions,
-          [side]: { qty: 0, avg: 0 },
-        },
-      }));
-      pushLog(`卖出 ${side}: ${pos.qty.toFixed(4)} 股 @ ${bid.toFixed(3)}，实现盈亏 ${formatMoney(pnl)}`);
-    },
-    [account.positions, pushLog, snapshot],
-  );
-
   useEffect(() => {
     refreshSnapshot(true);
     const timer = window.setInterval(() => {
@@ -185,120 +263,182 @@ export function PolymarketMonitor() {
   }, [refreshSnapshot]);
 
   useEffect(() => {
-    if (!auto || !snapshot) return;
-    const left = secsLeft(snapshot);
-    if (left !== null && left <= flatBefore) {
-      if (account.positions.UP.qty > 0) sellAll("UP");
-      if (account.positions.DOWN.qty > 0) sellAll("DOWN");
-      return;
-    }
+    if (!snapshot) return;
 
-    const upMid = snapshot.prices.up.mid;
-    const downMid = snapshot.prices.down.mid;
-    if (upMid !== null && upMid > 0.5 + threshold && account.positions.UP.qty <= 0) buySide("UP");
-    if (downMid !== null && downMid > 0.5 + threshold && account.positions.DOWN.qty <= 0) buySide("DOWN");
-  }, [account.positions.DOWN.qty, account.positions.UP.qty, auto, buySide, flatBefore, sellAll, snapshot, threshold]);
+    historyRef.current = [
+      ...historyRef.current,
+      {
+        ts: Date.now(),
+        upMid: snapshot.prices.up.mid,
+        downMid: snapshot.prices.down.mid,
+        upAsk: snapshot.prices.up.ask,
+        downAsk: snapshot.prices.down.ask,
+        upBid: snapshot.prices.up.bid,
+        downBid: snapshot.prices.down.bid,
+        slug: snapshot.market.slug,
+      },
+    ].slice(-180);
+
+    if (!auto) return;
+
+    const left = secsLeft(snapshot) ?? 0;
+
+    setStrategies((prev) =>
+      prev.map((strategy) => {
+        const now = Date.now();
+
+        if (strategy.position) {
+          const bid = bestBid(strategy.position.side, snapshot);
+          if (bid !== null) {
+            const ret = bid / strategy.position.entry - 1;
+            const holdSecs = (now - strategy.position.openedAt) / 1000;
+
+            if (
+              ret >= takeProfit(strategy.id) ||
+              ret <= stopLoss(strategy.id) ||
+              holdSecs >= maxHoldSeconds(strategy.id) ||
+              left <= FLAT_BEFORE_SECONDS ||
+              strategy.position.entry > 0.9 ||
+              historyRef.current[historyRef.current.length - 1]?.slug !== historyRef.current[historyRef.current.length - 2]?.slug
+            ) {
+              const proceeds = bid * strategy.position.qty;
+              const pnl = proceeds - strategy.position.spent;
+              const win = pnl >= 0;
+              pushLog(`${strategy.name} 平仓 ${strategy.position.side} @${bid.toFixed(3)}，P/L ${pnl.toFixed(3)} (${strategy.position.entryReason})`);
+              return {
+                ...strategy,
+                cash: strategy.cash + proceeds,
+                realized: strategy.realized + pnl,
+                trades: strategy.trades + 1,
+                wins: strategy.wins + (win ? 1 : 0),
+                losses: strategy.losses + (win ? 0 : 1),
+                position: null,
+                lastAction: `平仓${strategy.position.side}，本次${pnl >= 0 ? "盈利" : "亏损"}${pnl.toFixed(3)}`,
+              };
+            }
+          }
+          return strategy;
+        }
+
+        if (left <= FLAT_BEFORE_SECONDS + 5 || strategy.cash < ORDER_SIZE) {
+          return { ...strategy, lastAction: "等待下一轮或资金恢复" };
+        }
+
+        const entry = runEntryRule(strategy, historyRef.current, snapshot);
+        if (!entry) return strategy;
+
+        const ask = bestAsk(entry.side, snapshot);
+        if (ask === null || ask <= 0 || ask >= 0.95) {
+          return { ...strategy, lastAction: "信号出现，但价格不安全" };
+        }
+
+        const qty = ORDER_SIZE / ask;
+        pushLog(`${strategy.name} 开仓 ${entry.side} @${ask.toFixed(3)}，投入1，原因：${entry.reason}`);
+        return {
+          ...strategy,
+          cash: strategy.cash - ORDER_SIZE,
+          position: {
+            side: entry.side,
+            qty,
+            entry: ask,
+            spent: ORDER_SIZE,
+            openedAt: now,
+            entryReason: entry.reason,
+          },
+          lastAction: `开仓${entry.side}：${entry.reason}`,
+        };
+      }),
+    );
+  }, [auto, pushLog, snapshot]);
+
+  const summary = useMemo(() => {
+    return strategies.map((s) => {
+      const mark = s.position ? markPrice(s.position.side, snapshot) : null;
+      const positionValue = s.position && mark !== null ? mark * s.position.qty : 0;
+      const unrealized = s.position && mark !== null ? positionValue - s.position.spent : 0;
+      const equity = s.cash + positionValue;
+      const totalPnl = equity - INITIAL_CASH;
+      const winRate = s.trades > 0 ? (s.wins / s.trades) * 100 : 0;
+      return { ...s, positionValue, unrealized, equity, totalPnl, winRate };
+    });
+  }, [snapshot, strategies]);
 
   return (
     <div className="space-y-4">
-      <div className="grid gap-4 lg:grid-cols-3">
-        <Card className="lg:col-span-2">
-          <CardHeader>
-            <CardTitle>市场状态</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-2 text-sm text-slate-700">
-            <p>当前事件：{snapshot?.market.eventTitle ?? "-"}</p>
-            <p>当前 slug：{snapshot?.market.slug ?? "-"}</p>
-            <p>开始时间：{snapshot ? new Date(snapshot.market.startDate).toLocaleString("zh-CN") : "-"}</p>
-            <p>结算时间：{snapshot ? new Date(snapshot.market.endDate).toLocaleString("zh-CN") : "-"}</p>
-            <p>剩余时间：<span className="text-lg font-semibold">{secsLeft(snapshot) ?? "-"}s</span></p>
-            <p>发现来源：{snapshot?.market.source ?? "-"}</p>
-            <p>候选轮次：{snapshot?.candidates.slice(0, 4).join(" | ") ?? "-"}</p>
-          </CardContent>
-        </Card>
+      <Card>
+        <CardHeader>
+          <CardTitle>策略运行状态（全自动）</CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-2 text-sm text-slate-700">
+          <p>本金：每个策略起始 10；每次固定投入 1（按 Polymarket 份额定价计算：数量 = 1 / 买入价）。</p>
+          <p>当前事件：{snapshot?.market.eventTitle ?? "-"}</p>
+          <p>当前 slug：{snapshot?.market.slug ?? "-"}</p>
+          <p>结算倒计时：<span className="text-lg font-semibold">{secsLeft(snapshot) ?? "-"}s</span></p>
+          <p>代理状态：{proxyStatus}</p>
+          <div className="flex gap-2 pt-2">
+            <Button variant="outline" onClick={() => refreshSnapshot(true)}>立即刷新</Button>
+            <Button variant="outline" onClick={() => setAuto((v) => !v)}>{auto ? "暂停自动策略" : "恢复自动策略"}</Button>
+            <Button
+              variant="outline"
+              onClick={() => {
+                historyRef.current = [];
+                setStrategies(loadStrategies().map((s) => ({ ...s, cash: INITIAL_CASH, realized: 0, trades: 0, wins: 0, losses: 0, position: null, lastAction: "手动重置" })));
+                pushLog("已重置三套策略账户与统计");
+              }}
+            >
+              重置策略
+            </Button>
+          </div>
+        </CardContent>
+      </Card>
 
-        <Card>
-          <CardHeader>
-            <CardTitle>账户</CardTitle>
-          </CardHeader>
-          <CardContent className="space-y-2 text-sm text-slate-700">
-            <p>现金：{formatMoney(account.cash)}</p>
-            <p>持仓市值：{formatMoney(inventoryValue)}</p>
-            <p>总权益：{formatMoney(account.cash + inventoryValue)}</p>
-            <p>已实现盈亏：{formatMoney(account.realized)}</p>
-            <p>未实现盈亏：{formatMoney(unrealized)}</p>
-          </CardContent>
-        </Card>
+      <div className="grid gap-4 lg:grid-cols-3">
+        {summary.map((item) => (
+          <Card key={item.id}>
+            <CardHeader>
+              <CardTitle className="text-base">{item.name}</CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-1 text-sm text-slate-700">
+              <p className="text-xs text-slate-500">{item.description}</p>
+              <p>现金：{formatUnits(item.cash)}</p>
+              <p>持仓市值：{formatUnits(item.positionValue)}</p>
+              <p>未实现：{formatUnits(item.unrealized)}</p>
+              <p>总权益：<span className="font-semibold">{formatUnits(item.equity)}</span></p>
+              <p>累计收益：<span className={item.totalPnl >= 0 ? "text-emerald-600" : "text-rose-600"}>{formatUnits(item.totalPnl)}</span></p>
+              <p>已平仓笔数：{item.trades}（胜率 {item.winRate.toFixed(1)}%）</p>
+              <p>当前持仓：{item.position ? `${item.position.side} ${item.position.qty.toFixed(3)}份 @ ${item.position.entry.toFixed(3)}` : "无"}</p>
+              <p>最近动作：{item.lastAction}</p>
+            </CardContent>
+          </Card>
+        ))}
       </div>
 
       <Card>
         <CardHeader>
-          <CardTitle>价格与交易</CardTitle>
+          <CardTitle>实时价格</CardTitle>
         </CardHeader>
-        <CardContent className="space-y-3 text-sm">
-          <div className="grid gap-2 md:grid-cols-2">
-            <div className="rounded border border-slate-200 p-3">
-              <p className="font-semibold">UP</p>
-              <p>Bid: {formatPrice(snapshot?.prices.up.bid ?? null)}</p>
-              <p>Ask: {formatPrice(snapshot?.prices.up.ask ?? null)}</p>
-              <p>Mid: {formatPrice(snapshot?.prices.up.mid ?? null)}</p>
-              <p>持仓: {account.positions.UP.qty.toFixed(4)}</p>
-            </div>
-            <div className="rounded border border-slate-200 p-3">
-              <p className="font-semibold">DOWN</p>
-              <p>Bid: {formatPrice(snapshot?.prices.down.bid ?? null)}</p>
-              <p>Ask: {formatPrice(snapshot?.prices.down.ask ?? null)}</p>
-              <p>Mid: {formatPrice(snapshot?.prices.down.mid ?? null)}</p>
-              <p>持仓: {account.positions.DOWN.qty.toFixed(4)}</p>
-            </div>
+        <CardContent className="grid gap-2 md:grid-cols-2 text-sm">
+          <div className="rounded border border-slate-200 p-3">
+            <p className="font-semibold">UP</p>
+            <p>Bid: {formatPrice(snapshot?.prices.up.bid ?? null)}</p>
+            <p>Ask: {formatPrice(snapshot?.prices.up.ask ?? null)}</p>
+            <p>Mid: {formatPrice(snapshot?.prices.up.mid ?? null)}</p>
           </div>
-
-          <div className="grid gap-3 md:grid-cols-4">
-            <label className="space-y-1 text-xs">
-              <span>每次购买金额（美元）</span>
-              <input className="w-full rounded-md border border-slate-200 px-2 py-1" type="number" min={1} value={tradeUsd} onChange={(e) => setTradeUsd(Number(e.target.value))} />
-            </label>
-            <label className="space-y-1 text-xs">
-              <span>滑点缓冲</span>
-              <input className="w-full rounded-md border border-slate-200 px-2 py-1" type="number" step="0.001" min={0} value={slip} onChange={(e) => setSlip(Number(e.target.value))} />
-            </label>
-            <label className="space-y-1 text-xs">
-              <span>触发阈值</span>
-              <input className="w-full rounded-md border border-slate-200 px-2 py-1" type="number" step="0.001" min={0.001} value={threshold} onChange={(e) => setThreshold(Number(e.target.value))} />
-            </label>
-            <label className="space-y-1 text-xs">
-              <span>临近结算平仓秒数</span>
-              <input className="w-full rounded-md border border-slate-200 px-2 py-1" type="number" step="1" min={5} value={flatBefore} onChange={(e) => setFlatBefore(Number(e.target.value))} />
-            </label>
-          </div>
-
-          <div className="flex flex-wrap gap-2">
-            <Button onClick={() => buySide("UP")}>买入 UP</Button>
-            <Button onClick={() => buySide("DOWN")}>买入 DOWN</Button>
-            <Button variant="outline" onClick={() => sellAll("UP")}>卖出全部 UP</Button>
-            <Button variant="outline" onClick={() => sellAll("DOWN")}>卖出全部 DOWN</Button>
-            <Button variant="outline" onClick={() => setAuto((v) => !v)}>{auto ? "关闭自动策略" : "开启自动策略"}</Button>
-            <Button variant="outline" onClick={() => refreshSnapshot(true)}>立即刷新</Button>
-            <Button
-              variant="outline"
-              onClick={() => {
-                setAccount({ cash: 1000, realized: 0, positions: { UP: { qty: 0, avg: 0 }, DOWN: { qty: 0, avg: 0 } } });
-                pushLog("账户已重置");
-              }}
-            >
-              重置账户
-            </Button>
+          <div className="rounded border border-slate-200 p-3">
+            <p className="font-semibold">DOWN</p>
+            <p>Bid: {formatPrice(snapshot?.prices.down.bid ?? null)}</p>
+            <p>Ask: {formatPrice(snapshot?.prices.down.ask ?? null)}</p>
+            <p>Mid: {formatPrice(snapshot?.prices.down.mid ?? null)}</p>
           </div>
         </CardContent>
       </Card>
 
       <Card>
         <CardHeader>
-          <CardTitle>连接与日志</CardTitle>
+          <CardTitle>策略日志（持续统计）</CardTitle>
         </CardHeader>
         <CardContent>
-          <p className="mb-2 text-sm text-slate-600">代理状态：{proxyStatus}；自动跟随：开启（2.5 秒轮询，服务端聚合 + 短 TTL 缓存）。</p>
-          <div className="h-64 overflow-auto rounded border border-slate-200 bg-slate-50 p-2 font-mono text-xs text-slate-700">
+          <div className="h-72 overflow-auto rounded border border-slate-200 bg-slate-50 p-2 font-mono text-xs text-slate-700">
             {logs.length ? logs.join("\n") : "暂无日志"}
           </div>
         </CardContent>

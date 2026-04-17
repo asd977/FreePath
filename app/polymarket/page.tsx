@@ -5,8 +5,8 @@ export default function PolymarketPage() {
   return (
     <div className="space-y-6">
       <SectionHeading
-        title="Polymarket BTC 5m 模拟交易器"
-        description="已融入 FreePath：由服务端自动抓取 /crypto/5M 发现当前轮次，持续轮询并可随时查看状态。"
+        title="Polymarket BTC 5m 三策略自动塌缩交易"
+        description="3 套自动策略同时运行：每套起始资金 10、每次只投入 1，只有出现塌缩信号才开仓，并持续统计收益与胜率。"
       />
       <PolymarketMonitor />
     </div>
