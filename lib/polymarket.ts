@@ -117,40 +117,43 @@ async function requestJson<T>(url: string): Promise<T> {
   return JSON.parse(text) as T;
 }
 
-export async function discoverBtc5mMarket(): Promise<PolymarketDiscoverResponse> {
-  const html = await requestText(
-    "https://www.polymarket.com/crypto/5M",
-    "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+function buildWindowCandidates(baseStartTs: number, windows = 12): number[] {
+  const candidates = [baseStartTs];
+  for (let i = 1; i <= windows; i += 1) {
+    candidates.push(baseStartTs + i * 300, baseStartTs - i * 300);
+  }
+  return candidates;
+}
+
+async function discoverBtc5mFromGammaProbe(currentStartTs: number): Promise<PolymarketDiscoverResponse> {
+  const starts = buildWindowCandidates(currentStartTs, 12);
+  const attempts = await Promise.all(
+    starts.map(async (startTs) => {
+      const slug = `btc-updown-5m-${startTs}`;
+      try {
+        const market = await requestJson<PolymarketMarketRaw>(
+          `https://gamma-api.polymarket.com/markets/slug/${encodeURIComponent(slug)}`,
+        );
+        const hasTokens = Boolean(market?.clobTokenIds);
+        return hasTokens ? startTs : null;
+      } catch {
+        return null;
+      }
+    }),
   );
 
-  const matches = Array.from(html.matchAll(/btc-updown-5m-(\d{10})/g));
-  const numbers = Array.from(new Set(matches.map((item) => Number(item[1])).filter(Number.isFinite))).sort((a, b) => a - b);
-
-  if (numbers.length === 0) {
-    throw new Error("在 /crypto/5M 页面里没有解析到 BTC 5m slug");
+  const found = attempts.filter((v): v is number => v !== null);
+  if (!found.length) {
+    throw new Error("在 gamma 兜底探测中未发现可用 BTC 5m 市场");
   }
 
-  const currentStartTs = currentWindowStartTs();
-  const score = (startTs: number) => {
-    if (startTs === currentStartTs) return [0, 0] as const;
-    if (startTs === currentStartTs + 300) return [1, 300] as const;
-    if (startTs === currentStartTs - 300) return [2, 300] as const;
-    return [10, Math.abs(startTs - currentStartTs)] as const;
-  };
-
-  const ordered = [...numbers].sort((a, b) => {
-    const scoreA = score(a);
-    const scoreB = score(b);
-    return scoreA[0] - scoreB[0] || scoreA[1] - scoreB[1];
-  });
-
-  const chosen = ordered[0];
+  const chosen = found[0];
   const startUtc = new Date(chosen * 1000);
   const endUtc = new Date((chosen + 300) * 1000);
 
   return {
     ok: true,
-    source: "https://www.polymarket.com/crypto/5M",
+    source: "gamma-probe",
     slug: `btc-updown-5m-${chosen}`,
     startTs: chosen,
     endTs: chosen + 300,
@@ -159,8 +162,58 @@ export async function discoverBtc5mMarket(): Promise<PolymarketDiscoverResponse>
     startEt: startUtc.toLocaleString("sv-SE", { timeZone: "America/New_York" }).replace(" ", "T"),
     endEt: endUtc.toLocaleString("sv-SE", { timeZone: "America/New_York" }).replace(" ", "T"),
     currentStartTs,
-    candidates: ordered.slice(0, 10).map((v) => `btc-updown-5m-${v}`),
+    candidates: found.slice(0, 10).map((v) => `btc-updown-5m-${v}`),
   };
+}
+
+export async function discoverBtc5mMarket(): Promise<PolymarketDiscoverResponse> {
+  const currentStartTs = currentWindowStartTs();
+  try {
+    const html = await requestText(
+      "https://www.polymarket.com/crypto/5M",
+      "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    );
+
+    const matches = Array.from(html.matchAll(/btc-updown-5m-(\d{10})/g));
+    const numbers = Array.from(new Set(matches.map((item) => Number(item[1])).filter(Number.isFinite))).sort((a, b) => a - b);
+
+    if (numbers.length === 0) {
+      throw new Error("在 /crypto/5M 页面里没有解析到 BTC 5m slug");
+    }
+
+    const score = (startTs: number) => {
+      if (startTs === currentStartTs) return [0, 0] as const;
+      if (startTs === currentStartTs + 300) return [1, 300] as const;
+      if (startTs === currentStartTs - 300) return [2, 300] as const;
+      return [10, Math.abs(startTs - currentStartTs)] as const;
+    };
+
+    const ordered = [...numbers].sort((a, b) => {
+      const scoreA = score(a);
+      const scoreB = score(b);
+      return scoreA[0] - scoreB[0] || scoreA[1] - scoreB[1];
+    });
+
+    const chosen = ordered[0];
+    const startUtc = new Date(chosen * 1000);
+    const endUtc = new Date((chosen + 300) * 1000);
+
+    return {
+      ok: true,
+      source: "https://www.polymarket.com/crypto/5M",
+      slug: `btc-updown-5m-${chosen}`,
+      startTs: chosen,
+      endTs: chosen + 300,
+      startUtc: startUtc.toISOString(),
+      endUtc: endUtc.toISOString(),
+      startEt: startUtc.toLocaleString("sv-SE", { timeZone: "America/New_York" }).replace(" ", "T"),
+      endEt: endUtc.toLocaleString("sv-SE", { timeZone: "America/New_York" }).replace(" ", "T"),
+      currentStartTs,
+      candidates: ordered.slice(0, 10).map((v) => `btc-updown-5m-${v}`),
+    };
+  } catch {
+    return discoverBtc5mFromGammaProbe(currentStartTs);
+  }
 }
 
 function parseUpDownTokens(market: PolymarketMarketRaw): {
