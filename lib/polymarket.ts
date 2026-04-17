@@ -18,6 +18,7 @@ type Cache = {
 let snapshotCache: Cache | null = null;
 let proxyAgent: ProxyAgent | null | undefined;
 let proxyUrlCache: string | null | undefined;
+let proxySource: "env" | "default" | "none" = "none";
 
 function getProxyAgent() {
   if (proxyAgent !== undefined) return proxyAgent;
@@ -26,8 +27,11 @@ function getProxyAgent() {
     process.env.HTTPS_PROXY ||
     process.env.https_proxy ||
     process.env.HTTP_PROXY ||
-    process.env.http_proxy;
+    process.env.http_proxy ||
+    process.env.POLYMARKET_PROXY_FALLBACK ||
+    "http://127.0.0.1:7890";
   proxyUrlCache = proxyUrl || null;
+  proxySource = proxyUrl ? (process.env.POLYMARKET_PROXY_URL || process.env.HTTPS_PROXY || process.env.https_proxy || process.env.HTTP_PROXY || process.env.http_proxy ? "env" : "default") : "none";
   proxyAgent = proxyUrl ? new ProxyAgent(proxyUrl) : null;
   return proxyAgent;
 }
@@ -37,6 +41,7 @@ export function getPolymarketProxyInfo() {
   return {
     enabled: Boolean(agent),
     url: proxyUrlCache,
+    source: proxySource,
   };
 }
 
@@ -117,6 +122,9 @@ async function requestText(url: string, accept: string): Promise<string> {
       return response.body.text();
     } catch (error) {
       lastError = error instanceof Error ? error.message : String(error);
+      if (!lastError.trim()) {
+        lastError = "fetch failed";
+      }
       if (attempt < RETRY_COUNT) {
         await sleep(200 * attempt);
       }
@@ -180,6 +188,41 @@ async function discoverBtc5mFromGammaProbe(currentStartTs: number): Promise<Poly
   };
 }
 
+async function discoverBtc5mFromGammaSearch(currentStartTs: number): Promise<PolymarketDiscoverResponse> {
+  const rows = await requestJson<Array<{ slug?: string }>>(
+    "https://gamma-api.polymarket.com/markets?limit=500&search=btc-updown-5m",
+  );
+
+  const starts = rows
+    .map((item) => item.slug ?? "")
+    .map((slug) => slug.match(/btc-updown-5m-(\d{10})/)?.[1] ?? "")
+    .map((v) => Number(v))
+    .filter(Number.isFinite);
+
+  if (!starts.length) {
+    throw new Error("gamma 搜索未返回 btc-updown-5m 结果");
+  }
+
+  const unique = Array.from(new Set(starts)).sort((a, b) => Math.abs(a - currentStartTs) - Math.abs(b - currentStartTs));
+  const chosen = unique[0];
+  const startUtc = new Date(chosen * 1000);
+  const endUtc = new Date((chosen + 300) * 1000);
+
+  return {
+    ok: true,
+    source: "gamma-search",
+    slug: `btc-updown-5m-${chosen}`,
+    startTs: chosen,
+    endTs: chosen + 300,
+    startUtc: startUtc.toISOString(),
+    endUtc: endUtc.toISOString(),
+    startEt: startUtc.toLocaleString("sv-SE", { timeZone: "America/New_York" }).replace(" ", "T"),
+    endEt: endUtc.toLocaleString("sv-SE", { timeZone: "America/New_York" }).replace(" ", "T"),
+    currentStartTs,
+    candidates: unique.slice(0, 10).map((v) => `btc-updown-5m-${v}`),
+  };
+}
+
 export async function discoverBtc5mMarket(): Promise<PolymarketDiscoverResponse> {
   const currentStartTs = currentWindowStartTs();
   try {
@@ -187,6 +230,9 @@ export async function discoverBtc5mMarket(): Promise<PolymarketDiscoverResponse>
     return await discoverBtc5mFromGammaProbe(currentStartTs);
   } catch (gammaError) {
     try {
+      return await discoverBtc5mFromGammaSearch(currentStartTs);
+    } catch (gammaSearchError) {
+      try {
       const html = await requestText(
         "https://www.polymarket.com/crypto/5M",
         "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -229,10 +275,12 @@ export async function discoverBtc5mMarket(): Promise<PolymarketDiscoverResponse>
         currentStartTs,
         candidates: ordered.slice(0, 10).map((v) => `btc-updown-5m-${v}`),
       };
-    } catch (htmlError) {
-      const gammaMessage = gammaError instanceof Error ? gammaError.message : String(gammaError);
-      const htmlMessage = htmlError instanceof Error ? htmlError.message : String(htmlError);
-      throw new Error(`市场发现失败：gamma=${gammaMessage}; html=${htmlMessage}`);
+      } catch (htmlError) {
+        const gammaMessage = gammaError instanceof Error ? gammaError.message : String(gammaError);
+        const gammaSearchMessage = gammaSearchError instanceof Error ? gammaSearchError.message : String(gammaSearchError);
+        const htmlMessage = htmlError instanceof Error ? htmlError.message : String(htmlError);
+        throw new Error(`市场发现失败：gammaProbe=${gammaMessage}; gammaSearch=${gammaSearchMessage}; html=${htmlMessage}`);
+      }
     }
   }
 }
