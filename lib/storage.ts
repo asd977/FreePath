@@ -1,6 +1,7 @@
 import { STORAGE_KEYS } from "@/config/defaults";
 import { FinanceInputs } from "@/types/finance";
 import { MonthlyRecord } from "@/types/record";
+import { StockInput } from "@/types/stock";
 
 function safeGet<T>(key: string, fallback: T): T {
   if (typeof window === "undefined") return fallback;
@@ -30,6 +31,12 @@ export const storage = {
   },
   setRecords(value: MonthlyRecord[]): void {
     safeSet(STORAGE_KEYS.records, value);
+  },
+  getStocks(): StockInput[] {
+    return safeGet(STORAGE_KEYS.stocks, [] as StockInput[]);
+  },
+  setStocks(value: StockInput[]): void {
+    safeSet(STORAGE_KEYS.stocks, value);
   },
   clearAll(): void {
     if (typeof window === "undefined") return;
