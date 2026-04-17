@@ -1,26 +1,37 @@
 "use client";
 
-import { Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis, ReferenceLine } from "recharts";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { ProjectionPoint } from "@/types/finance";
 import { formatCurrency } from "@/lib/utils";
 
 export function AssetGrowthChart({ data }: { data: ProjectionPoint[] }) {
+  const maxValue = Math.max(...data.map((d) => Math.max(d.assets, d.target)), 1);
+
   return (
     <Card>
       <CardHeader>
-        <CardTitle>资产增长曲线</CardTitle>
+        <CardTitle>资产增长曲线（轻量版）</CardTitle>
       </CardHeader>
-      <CardContent className="h-80">
-        <ResponsiveContainer width="100%" height="100%">
-          <LineChart data={data} margin={{ top: 16, right: 16, left: 8, bottom: 8 }}>
-            <XAxis dataKey="month" tick={{ fontSize: 12 }} minTickGap={24} />
-            <YAxis tickFormatter={(v) => `${Math.round(v / 10000)}w`} tick={{ fontSize: 12 }} width={56} />
-            <Tooltip formatter={(v) => formatCurrency(Number(v ?? 0))} />
-            <ReferenceLine y={data[0]?.target ?? 0} stroke="#64748b" strokeDasharray="4 4" />
-            <Line type="monotone" dataKey="assets" stroke="#0f172a" strokeWidth={2} dot={false} />
-          </LineChart>
-        </ResponsiveContainer>
+      <CardContent>
+        <div className="space-y-3">
+          {data.filter((_, idx) => idx % 12 === 0 || idx === data.length - 1).map((point) => {
+            const assetPct = Math.min((point.assets / maxValue) * 100, 100);
+            const targetPct = Math.min((point.target / maxValue) * 100, 100);
+            return (
+              <div key={point.month} className="space-y-1">
+                <div className="flex items-center justify-between text-xs text-slate-600">
+                  <span>{point.month}</span>
+                  <span>{formatCurrency(point.assets)}</span>
+                </div>
+                <div className="relative h-2 rounded bg-slate-200">
+                  <div className="absolute inset-y-0 left-0 rounded bg-slate-900" style={{ width: `${assetPct}%` }} />
+                  <div className="absolute inset-y-0 rounded bg-slate-500/60" style={{ left: `${targetPct}%`, width: "2px" }} />
+                </div>
+              </div>
+            );
+          })}
+          <p className="text-xs text-slate-500">深色条为资产，浅灰竖线为目标资产位置。</p>
+        </div>
       </CardContent>
     </Card>
   );
