@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { currentMonth } from "@/lib/date";
 import { MonthlyRecord, RecordType } from "@/types/record";
 
 function isValidMonth(value: unknown): value is string {
@@ -19,13 +20,14 @@ export async function GET() {
 export async function POST(req: Request) {
   try {
     const body = (await req.json()) as Partial<MonthlyRecord>;
-    if (!isValidMonth(body.month) || typeof body.amount !== "number" || body.amount < 0 || !isValidType(body.type)) {
+    const month = isValidMonth(body.month) ? body.month : currentMonth();
+    if (typeof body.amount !== "number" || body.amount < 0 || !isValidType(body.type)) {
       return NextResponse.json({ ok: false, error: "Invalid record payload" }, { status: 400 });
     }
 
     const item: MonthlyRecord = {
       id: typeof body.id === "string" && body.id ? body.id : crypto.randomUUID(),
-      month: body.month,
+      month,
       amount: body.amount,
       type: body.type,
       note: typeof body.note === "string" ? body.note : "",

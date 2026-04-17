@@ -6,6 +6,7 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
+import { currentMonth } from "@/lib/date";
 import { RecordType } from "@/types/record";
 
 type FormValues = {
@@ -16,7 +17,12 @@ type FormValues = {
 };
 
 export function MonthlyRecordForm({ onSubmit }: { onSubmit: (values: FormValues) => void }) {
-  const [values, setValues] = useState<FormValues>({ month: "", amount: 0, type: "deposit", note: "" });
+  const [values, setValues] = useState<FormValues>({
+    month: currentMonth(),
+    amount: 0,
+    type: "deposit",
+    note: "",
+  });
 
   return (
     <Card>
@@ -30,7 +36,7 @@ export function MonthlyRecordForm({ onSubmit }: { onSubmit: (values: FormValues)
             e.preventDefault();
             if (!values.month || values.amount < 0) return;
             onSubmit(values);
-            setValues({ month: "", amount: 0, type: "deposit", note: "" });
+            setValues({ month: currentMonth(), amount: 0, type: values.type, note: "" });
           }}
         >
           <div className="space-y-2">
@@ -45,7 +51,7 @@ export function MonthlyRecordForm({ onSubmit }: { onSubmit: (values: FormValues)
             </select>
           </div>
           <div className="space-y-2">
-            <Label>月份</Label>
+            <Label>月份（默认本月）</Label>
             <Input
               type="month"
               value={values.month}
@@ -53,7 +59,7 @@ export function MonthlyRecordForm({ onSubmit }: { onSubmit: (values: FormValues)
             />
           </div>
           <div className="space-y-2">
-            <Label>当月存入金额</Label>
+            <Label>{values.type === "expense" ? "当月支出金额" : "当月存入金额"}</Label>
             <Input
               type="number"
               min={0}

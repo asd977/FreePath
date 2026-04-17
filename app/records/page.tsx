@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { SectionHeading } from "@/components/common/section-heading";
+import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { CashflowOverviewChart } from "@/components/charts/cashflow-overview-chart";
 import { MonthlyRecordForm } from "@/components/records/monthly-record-form";
@@ -19,6 +20,7 @@ function initialRecords() {
 
 export default function RecordsPage() {
   const [records, setRecords] = useState<MonthlyRecord[]>(initialRecords);
+  const [filter, setFilter] = useState<"all" | "deposit" | "expense">("all");
 
   const stats = useMemo(() => {
     const totalDeposit = records
@@ -51,6 +53,11 @@ export default function RecordsPage() {
     };
   }, [records]);
 
+  const visibleRecords = useMemo(() => {
+    if (filter === "all") return records;
+    return records.filter((item) => item.type === filter);
+  }, [filter, records]);
+
   function persist(next: MonthlyRecord[]) {
     setRecords(next);
     storage.setRecords(next);
@@ -58,7 +65,7 @@ export default function RecordsPage() {
 
   return (
     <div className="space-y-6">
-      <SectionHeading title="记录页" description="管理每月存入记录，后续可无缝切换到数据库。" />
+      <SectionHeading title="记录页" description="像记账本一样记录存入与支出，自动汇总净现金流。" />
       <div className="grid gap-6 xl:grid-cols-3">
         <div className="xl:col-span-1">
           <MonthlyRecordForm
@@ -91,7 +98,26 @@ export default function RecordsPage() {
             </CardContent>
           </Card>
           <CashflowOverviewChart data={stats.monthlySeries} />
-          <MonthlyRecordList records={records} onDelete={(id) => persist(records.filter((item) => item.id !== id))} />
+          <div className="flex items-center gap-2">
+            <Button size="sm" variant={filter === "all" ? "default" : "outline"} onClick={() => setFilter("all")}>
+              全部
+            </Button>
+            <Button
+              size="sm"
+              variant={filter === "deposit" ? "default" : "outline"}
+              onClick={() => setFilter("deposit")}
+            >
+              仅存入
+            </Button>
+            <Button
+              size="sm"
+              variant={filter === "expense" ? "default" : "outline"}
+              onClick={() => setFilter("expense")}
+            >
+              仅支出
+            </Button>
+          </div>
+          <MonthlyRecordList records={visibleRecords} onDelete={(id) => persist(records.filter((item) => item.id !== id))} />
         </div>
       </div>
     </div>
