@@ -10,6 +10,7 @@ const navItems = [
   { href: "/analysis", label: "分析" },
   { href: "/records", label: "记录" },
   { href: "/settings", label: "设置" },
+  { href: "/polymarket", label: "Polymarket" },
 ];
 
 export function AppHeader() {
