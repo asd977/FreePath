@@ -43,7 +43,7 @@ type PriceTick = {
 const INITIAL_CASH = 10;
 const ORDER_SIZE = 1;
 const FLAT_BEFORE_SECONDS = 25;
-const STORAGE_KEY = "freepath_polymarket_3strategy_v1";
+const STORAGE_KEY = "freepath_polymarket_3strategy_v2";
 
 function formatPrice(value: number | null, digits = 3): string {
   if (value === null || !Number.isFinite(value)) return "-";
@@ -89,40 +89,40 @@ function upDownFromSnapshot(snapshot: PolymarketSnapshotResponse | null) {
 function loadStrategies(): StrategyState[] {
   const defaults: StrategyState[] = [
     {
-      id: "flash-drop",
-      name: "策略A：急跌抄底",
-      description: "8-12秒内塌缩明显才入场，优先抄底跌幅更大的那一边。",
+      id: "value-discount",
+      name: "策略A：高概率折价",
+      description: "当某一边概率已经较高（≥60%）且买一价格明显低于参考价时，买入该边。",
       cash: INITIAL_CASH,
       realized: 0,
       trades: 0,
       wins: 0,
       losses: 0,
       position: null,
-      lastAction: "等待塌缩信号",
+      lastAction: "等待高概率折价",
     },
     {
-      id: "double-shock",
-      name: "策略B：双边塌缩",
-      description: "当UP和DOWN同时塌缩时，只买更便宜的一边，偏防守。",
+      id: "trend-follow",
+      name: "策略B：趋势跟随",
+      description: "当某一边概率持续抬升且已站上中高概率区间时，顺势跟随。",
       cash: INITIAL_CASH,
       realized: 0,
       trades: 0,
       wins: 0,
       losses: 0,
       position: null,
-      lastAction: "等待双塌缩",
+      lastAction: "等待趋势增强",
     },
     {
-      id: "oversold-rebound",
-      name: "策略C：超跌回弹",
-      description: "先等深度塌缩，再等1-2跳止跌反弹确认后再买。",
+      id: "reversal-defense",
+      name: "策略C：回撤防守反转",
+      description: "高概率边短时回撤后重新转强，再次上行时买入，避免追最高点。",
       cash: INITIAL_CASH,
       realized: 0,
       trades: 0,
       wins: 0,
       losses: 0,
       position: null,
-      lastAction: "等待超跌+止跌",
+      lastAction: "等待回撤后再转强",
     },
   ];
 
@@ -139,83 +139,87 @@ function loadStrategies(): StrategyState[] {
   }
 }
 
-function pickByLargestDrop(upDrop: number, downDrop: number): Side {
-  return upDrop >= downDrop ? "UP" : "DOWN";
-}
-
-function historyDrop(history: PriceTick[], side: Side, lookbackTicks: number): number {
+function historyMove(history: PriceTick[], side: Side, lookbackTicks: number): number {
   if (history.length <= lookbackTicks) return 0;
   const current = side === "UP" ? history[history.length - 1].upMid : history[history.length - 1].downMid;
   const old = side === "UP" ? history[history.length - 1 - lookbackTicks].upMid : history[history.length - 1 - lookbackTicks].downMid;
   if (current === null || old === null) return 0;
-  return old - current;
+  return current - old;
 }
 
-function historyDropPct(history: PriceTick[], side: Side, lookbackTicks: number): number {
+function historyMovePct(history: PriceTick[], side: Side, lookbackTicks: number): number {
   if (history.length <= lookbackTicks) return 0;
   const current = side === "UP" ? history[history.length - 1].upMid : history[history.length - 1].downMid;
   const old = side === "UP" ? history[history.length - 1 - lookbackTicks].upMid : history[history.length - 1 - lookbackTicks].downMid;
   if (current === null || old === null || old <= 0) return 0;
-  return (old - current) / old;
+  return (current - old) / old;
 }
 
-function isMicroRebound(history: PriceTick[], side: Side): boolean {
+function isPullbackThenResume(history: PriceTick[], side: Side): boolean {
   if (history.length < 4) return false;
   const a = side === "UP" ? history[history.length - 1].upMid : history[history.length - 1].downMid;
   const b = side === "UP" ? history[history.length - 2].upMid : history[history.length - 2].downMid;
   const c = side === "UP" ? history[history.length - 3].upMid : history[history.length - 3].downMid;
   if (a === null || b === null || c === null) return false;
-  return c <= b && a > b;
+  return b < c && a > b;
+}
+
+function sideWithHigherProb(snapshot: PolymarketSnapshotResponse): Side | null {
+  const up = referencePrice("UP", snapshot);
+  const down = referencePrice("DOWN", snapshot);
+  if (up === null && down === null) return null;
+  if (up !== null && down !== null) return up >= down ? "UP" : "DOWN";
+  return up !== null ? "UP" : "DOWN";
 }
 
 function runEntryRule(strategy: StrategyState, history: PriceTick[], snapshot: PolymarketSnapshotResponse): { side: Side; reason: string } | null {
   if (history.length < 6) return null;
 
-  const upDropFast = historyDrop(history, "UP", 4);
-  const downDropFast = historyDrop(history, "DOWN", 4);
-  const upDropSlow = historyDrop(history, "UP", 8);
-  const downDropSlow = historyDrop(history, "DOWN", 8);
-  const upDropFastPct = historyDropPct(history, "UP", 4);
-  const downDropFastPct = historyDropPct(history, "DOWN", 4);
-  const upDropSlowPct = historyDropPct(history, "UP", 8);
-  const downDropSlowPct = historyDropPct(history, "DOWN", 8);
+  const upMoveFast = historyMove(history, "UP", 4);
+  const downMoveFast = historyMove(history, "DOWN", 4);
+  const upMoveSlow = historyMove(history, "UP", 8);
+  const downMoveSlow = historyMove(history, "DOWN", 8);
+  const upMoveFastPct = historyMovePct(history, "UP", 4);
+  const downMoveFastPct = historyMovePct(history, "DOWN", 4);
+  const upMoveSlowPct = historyMovePct(history, "UP", 8);
+  const downMoveSlowPct = historyMovePct(history, "DOWN", 8);
   const current = upDownFromSnapshot(snapshot);
+  const dominantSide = sideWithHigherProb(snapshot);
 
   switch (strategy.id) {
-    case "flash-drop": {
-      const side = pickByLargestDrop(upDropFast, downDropFast);
+    case "value-discount": {
+      if (!dominantSide) return null;
+      const side = dominantSide;
       const sideMid = side === "UP" ? current.up : current.down;
-      const drop = side === "UP" ? upDropFast : downDropFast;
-      const dropPct = side === "UP" ? upDropFastPct : downDropFastPct;
-      if (sideMid !== null && sideMid < 0.58 && sideMid > 0.08 && drop >= 0.015 && dropPct >= 0.06) {
-        return { side, reason: `急跌${drop.toFixed(3)}(${(dropPct * 100).toFixed(1)}%)后抄底` };
+      const sideAsk = bestAsk(side, snapshot);
+      if (sideMid === null || sideAsk === null || sideAsk <= 0) return null;
+      const discount = sideMid - sideAsk;
+      if (sideMid >= 0.6 && sideMid <= 0.9 && discount >= 0.015) {
+        return { side, reason: `高概率${(sideMid * 100).toFixed(1)}%且折价${discount.toFixed(3)}` };
       }
       return null;
     }
-    case "double-shock": {
-      const upAsk = bestAsk("UP", snapshot);
-      const downAsk = bestAsk("DOWN", snapshot);
-      if (
-        upAsk !== null &&
-        downAsk !== null &&
-        upDropFast >= 0.012 &&
-        downDropFast >= 0.012 &&
-        upDropFastPct >= 0.035 &&
-        downDropFastPct >= 0.035 &&
-        upAsk + downAsk <= 0.99
-      ) {
-        const side: Side = upAsk <= downAsk ? "UP" : "DOWN";
-        return { side, reason: `双边塌缩，选更便宜${side}` };
+    case "trend-follow": {
+      if (!dominantSide) return null;
+      const side = dominantSide;
+      const sideMid = side === "UP" ? current.up : current.down;
+      const fastMove = side === "UP" ? upMoveFast : downMoveFast;
+      const fastMovePct = side === "UP" ? upMoveFastPct : downMoveFastPct;
+      const slowMove = side === "UP" ? upMoveSlow : downMoveSlow;
+      const ask = bestAsk(side, snapshot);
+      if (sideMid !== null && ask !== null && sideMid >= 0.58 && sideMid <= 0.88 && fastMove >= 0.01 && fastMovePct >= 0.02 && slowMove > 0) {
+        return { side, reason: `趋势上行${fastMove.toFixed(3)}，概率${(sideMid * 100).toFixed(1)}%` };
       }
       return null;
     }
-    case "oversold-rebound": {
-      const side = pickByLargestDrop(upDropSlow, downDropSlow);
+    case "reversal-defense": {
+      if (!dominantSide) return null;
+      const side = dominantSide;
       const sideMid = side === "UP" ? current.up : current.down;
-      const deepDrop = side === "UP" ? upDropSlow : downDropSlow;
-      const deepDropPct = side === "UP" ? upDropSlowPct : downDropSlowPct;
-      if (sideMid !== null && sideMid < 0.5 && deepDrop >= 0.02 && deepDropPct >= 0.1 && isMicroRebound(history, side)) {
-        return { side, reason: `超跌${deepDrop.toFixed(3)}(${(deepDropPct * 100).toFixed(1)}%)后止跌回弹` };
+      const fastMove = side === "UP" ? upMoveFast : downMoveFast;
+      const slowMovePct = side === "UP" ? upMoveSlowPct : downMoveSlowPct;
+      if (sideMid !== null && sideMid >= 0.62 && sideMid <= 0.9 && slowMovePct > 0 && fastMove > 0 && isPullbackThenResume(history, side)) {
+        return { side, reason: `回撤后再转强，当前概率${(sideMid * 100).toFixed(1)}%` };
       }
       return null;
     }
@@ -225,21 +229,21 @@ function runEntryRule(strategy: StrategyState, history: PriceTick[], snapshot: P
 }
 
 function maxHoldSeconds(strategyId: string): number {
-  if (strategyId === "flash-drop") return 35;
-  if (strategyId === "double-shock") return 45;
-  return 55;
+  if (strategyId === "value-discount") return 50;
+  if (strategyId === "trend-follow") return 60;
+  return 70;
 }
 
 function takeProfit(strategyId: string): number {
-  if (strategyId === "flash-drop") return 0.06;
-  if (strategyId === "double-shock") return 0.045;
-  return 0.07;
+  if (strategyId === "value-discount") return 0.04;
+  if (strategyId === "trend-follow") return 0.05;
+  return 0.055;
 }
 
 function stopLoss(strategyId: string): number {
-  if (strategyId === "flash-drop") return -0.035;
-  if (strategyId === "double-shock") return -0.025;
-  return -0.04;
+  if (strategyId === "value-discount") return -0.025;
+  if (strategyId === "trend-follow") return -0.03;
+  return -0.028;
 }
 
 export function PolymarketMonitor() {
@@ -320,7 +324,7 @@ export function PolymarketMonitor() {
               ret <= stopLoss(strategy.id) ||
               holdSecs >= maxHoldSeconds(strategy.id) ||
               left <= FLAT_BEFORE_SECONDS ||
-              strategy.position.entry > 0.9 ||
+              strategy.position.entry > 0.92 ||
               historyRef.current[historyRef.current.length - 1]?.slug !== historyRef.current[historyRef.current.length - 2]?.slug
             ) {
               const proceeds = bid * strategy.position.qty;
@@ -350,7 +354,7 @@ export function PolymarketMonitor() {
         if (!entry) return strategy;
 
         const ask = bestAsk(entry.side, snapshot);
-        if (ask === null || ask <= 0 || ask >= 0.98) {
+        if (ask === null || ask <= 0 || ask >= 0.96) {
           return { ...strategy, lastAction: "信号出现，但价格不安全" };
         }
 
@@ -393,6 +397,7 @@ export function PolymarketMonitor() {
         </CardHeader>
         <CardContent className="space-y-2 text-sm text-slate-700">
           <p>本金：每个策略起始 10；每次固定投入 1（按 Polymarket 份额定价计算：数量 = 1 / 买入价）。</p>
+          <p>新版逻辑：不再限定“塌缩”，改为围绕高概率边做折价、趋势、回撤三类入场。</p>
           <p>当前事件：{snapshot?.market.eventTitle ?? "-"}</p>
           <p>当前 slug：{snapshot?.market.slug ?? "-"}</p>
           <p>结算倒计时：<span className="text-lg font-semibold">{secsLeft(snapshot) ?? "-"}s</span></p>
