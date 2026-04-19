@@ -67,10 +67,24 @@ function bestBid(book: PolymarketBook): number | null {
   return Number.isFinite(value) ? value : null;
 }
 
+function topBidSize(book: PolymarketBook): number | null {
+  const size = book.bids?.[0]?.size;
+  if (!size) return null;
+  const value = Number(size);
+  return Number.isFinite(value) ? value : null;
+}
+
 function bestAsk(book: PolymarketBook): number | null {
   const price = book.asks?.[0]?.price;
   if (!price) return null;
   const value = Number(price);
+  return Number.isFinite(value) ? value : null;
+}
+
+function topAskSize(book: PolymarketBook): number | null {
+  const size = book.asks?.[0]?.size;
+  if (!size) return null;
+  const value = Number(size);
   return Number.isFinite(value) ? value : null;
 }
 
@@ -84,12 +98,28 @@ function midpoint(bid: number | null, ask: number | null): number | null {
 function toSidePrice(tokenId: string, book: PolymarketBook, seed: number | null): SidePrice {
   const bid = bestBid(book);
   const ask = bestAsk(book);
+  const bidSize = topBidSize(book);
+  const askSize = topAskSize(book);
   return {
     tokenId,
     bid,
     ask,
     mid: midpoint(bid, ask) ?? seed,
+    spread: bid !== null && ask !== null ? ask - bid : null,
+    topBidSize: bidSize,
+    topAskSize: askSize,
+    topDepth: bidSize !== null && askSize !== null ? Math.min(bidSize, askSize) : bidSize ?? askSize,
   };
+}
+
+function parsePriceToBeat(text: string | undefined): number | null {
+  if (!text) return null;
+  const direct = text.match(/price\s*to\s*beat[^$]*\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)/i)?.[1];
+  const fallback = text.match(/btc[^$]*\$\s*([0-9][0-9,]*(?:\.[0-9]+)?)/i)?.[1];
+  const picked = direct ?? fallback;
+  if (!picked) return null;
+  const value = Number(picked.replaceAll(",", ""));
+  return Number.isFinite(value) ? value : null;
 }
 
 export function currentWindowStartTs(nowMs = Date.now()): number {
@@ -356,10 +386,15 @@ export async function loadPolymarketSnapshot(forceRefresh = false): Promise<Poly
       startDate: market.startDate || discovery.startUtc,
       endDate: market.endDate || discovery.endUtc,
       source: discovery.source,
+      priceToBeat: parsePriceToBeat(market.question || market.title),
     },
     prices: {
       up: toSidePrice(upToken, upBook, seedUp),
       down: toSidePrice(downToken, downBook, seedDown),
+    },
+    recentTrade: {
+      price: midpoint(bestBid(upBook), bestAsk(upBook)),
+      side: null,
     },
     candidates: discovery.candidates,
     fetchedAt: new Date().toISOString(),

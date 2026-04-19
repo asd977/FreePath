@@ -27,6 +27,7 @@ type StrategyState = {
   losses: number;
   position: Position | null;
   lastAction: string;
+  lastEntrySlug?: string | null;
 };
 
 type PriceTick = {
@@ -40,10 +41,42 @@ type PriceTick = {
   slug: string;
 };
 
+type BtcTick = {
+  ts: number;
+  chainlink: number | null;
+  binance: number | null;
+};
+
+type Candle5s = {
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  startTs: number;
+  endTs: number;
+};
+
 const INITIAL_CASH = 10;
 const ORDER_SIZE = 1;
 const FLAT_BEFORE_SECONDS = 25;
-const STORAGE_KEY = "freepath_polymarket_3strategy_v2";
+const STORAGE_KEY = "freepath_polymarket_4strategy_v3";
+const D_STRATEGY_ID = "anchor-structure-edge";
+const D_CONFIG = {
+  minVolFloor: 8,
+  w1: 1.2,
+  w2: 0.8,
+  w3: 0.6,
+  w4: 0.8,
+  w5: 1.0,
+  breakoutHoldSeconds: 3,
+  entryZ: 1.2,
+  minAbsDelta: 15,
+  maxAsk: 0.72,
+  maxSpread: 0.03,
+  feeEstimate: 0.006,
+  slippageBuffer: 0.004,
+  maxWaitFillSeconds: 3,
+};
 
 function formatPrice(value: number | null, digits = 3): string {
   if (value === null || !Number.isFinite(value)) return "-";
@@ -124,6 +157,19 @@ function loadStrategies(): StrategyState[] {
       position: null,
       lastAction: "等待回撤后再转强",
     },
+    {
+      id: D_STRATEGY_ID,
+      name: "策略D：锚点偏离+结构错价",
+      description: "融合 Price to Beat 偏离、1秒斜率、5秒K结构、公平概率与盘口质量过滤后再开仓。",
+      cash: INITIAL_CASH,
+      realized: 0,
+      trades: 0,
+      wins: 0,
+      losses: 0,
+      position: null,
+      lastAction: "观察期中",
+      lastEntrySlug: null,
+    },
   ];
 
   if (typeof window === "undefined") return defaults;
@@ -172,7 +218,61 @@ function sideWithHigherProb(snapshot: PolymarketSnapshotResponse): Side | null {
   return up !== null ? "UP" : "DOWN";
 }
 
-function runEntryRule(strategy: StrategyState, history: PriceTick[], snapshot: PolymarketSnapshotResponse): { side: Side; reason: string } | null {
+function sigmoid(x: number): number {
+  return 1 / (1 + Math.exp(-x));
+}
+
+function slopeFromTicks(series: number[], seconds: number): number {
+  if (series.length < seconds + 1) return 0;
+  const end = series[series.length - 1];
+  const start = series[series.length - 1 - seconds];
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return 0;
+  return (end - start) / seconds;
+}
+
+function stddev(values: number[]): number {
+  if (!values.length) return 0;
+  const mean = values.reduce((a, b) => a + b, 0) / values.length;
+  const variance = values.reduce((acc, v) => acc + (v - mean) ** 2, 0) / values.length;
+  return Math.sqrt(variance);
+}
+
+function build5sCandles(prices: number[], nowTs: number): Candle5s[] {
+  const candles: Candle5s[] = [];
+  if (prices.length < 5) return candles;
+  const points = prices.slice(-60);
+  for (let i = 0; i + 5 <= points.length; i += 5) {
+    const block = points.slice(i, i + 5);
+    candles.push({
+      open: block[0],
+      high: Math.max(...block),
+      low: Math.min(...block),
+      close: block[block.length - 1],
+      startTs: nowTs - (points.length - i) * 1000,
+      endTs: nowTs - (points.length - (i + 5)) * 1000,
+    });
+  }
+  return candles;
+}
+
+function longUpperWick(candle: Candle5s): boolean {
+  const bodyTop = Math.max(candle.open, candle.close);
+  const bodyLen = Math.max(Math.abs(candle.close - candle.open), 0.1);
+  return candle.high - bodyTop > bodyLen * 1.4;
+}
+
+function longLowerWick(candle: Candle5s): boolean {
+  const bodyBottom = Math.min(candle.open, candle.close);
+  const bodyLen = Math.max(Math.abs(candle.close - candle.open), 0.1);
+  return bodyBottom - candle.low > bodyLen * 1.4;
+}
+
+function runEntryRule(
+  strategy: StrategyState,
+  history: PriceTick[],
+  snapshot: PolymarketSnapshotResponse,
+  btcTicks: BtcTick[],
+): { side: Side; reason: string } | null {
   if (history.length < 6) return null;
 
   const upMoveFast = historyMove(history, "UP", 4);
@@ -223,24 +323,131 @@ function runEntryRule(strategy: StrategyState, history: PriceTick[], snapshot: P
       }
       return null;
     }
+    case D_STRATEGY_ID: {
+      const now = Date.now();
+      const marketStart = Date.parse(snapshot.market.startDate);
+      const elapsed = Number.isFinite(marketStart) ? Math.max(0, Math.floor((now - marketStart) / 1000)) : 0;
+      const left = secsLeft(snapshot) ?? 0;
+      if (elapsed <= 30) return null;
+      if (elapsed > 210 || left < 45) return null;
+      if (strategy.lastEntrySlug === snapshot.market.slug) return null;
+      const chainSeries = btcTicks.map((t) => t.chainlink).filter((v): v is number => v !== null);
+      const binanceSeries = btcTicks.map((t) => t.binance).filter((v): v is number => v !== null);
+      if (chainSeries.length < 45 || binanceSeries.length < 45) return null;
+
+      const chain = chainSeries[chainSeries.length - 1];
+      const binance = binanceSeries[binanceSeries.length - 1];
+      const priceToBeat = snapshot.market.priceToBeat;
+      if (priceToBeat === null || priceToBeat <= 0) return null;
+      const delta = chain - priceToBeat;
+      const absDelta = Math.abs(delta);
+      const recent30 = chainSeries.slice(-31);
+      const returns30 = recent30.slice(1).map((v, i) => (v - recent30[i]) / recent30[i]);
+      const sigma30 = stddev(returns30) * priceToBeat;
+      const z = delta / Math.max(sigma30, D_CONFIG.minVolFloor);
+
+      const slope10 = slopeFromTicks(chainSeries, 10);
+      const slope20 = slopeFromTicks(chainSeries, 20);
+      const slope40 = slopeFromTicks(chainSeries, 40);
+      const candles = build5sCandles(chainSeries, now);
+      if (candles.length < 6) return null;
+      const recent3 = candles.slice(-3);
+      const recent2 = candles.slice(-2);
+      const bullish3 = recent3.filter((c) => c.close > c.open).length;
+      const bearish3 = recent3.filter((c) => c.close < c.open).length;
+      const noLongUpper = recent2.every((c) => !longUpperWick(c));
+      const noLongLower = recent2.every((c) => !longLowerWick(c));
+      const recent30High = Math.max(...chainSeries.slice(-30));
+      const recent30Low = Math.min(...chainSeries.slice(-30));
+      const breakoutUp = chain > recent30High && chainSeries.slice(-D_CONFIG.breakoutHoldSeconds).every((v) => v >= recent30High);
+      const breakoutDown = chain < recent30Low && chainSeries.slice(-D_CONFIG.breakoutHoldSeconds).every((v) => v <= recent30Low);
+      const divergence = Math.abs(chain - binance);
+      const reversalRisk = (noLongUpper ? 0 : 0.8) + (divergence > 12 ? 1 : 0);
+      const breakoutScore = breakoutUp ? 1 : breakoutDown ? -1 : 0;
+      const scoreUp =
+        D_CONFIG.w1 * z +
+        D_CONFIG.w2 * slope20 +
+        D_CONFIG.w3 * slope40 +
+        D_CONFIG.w4 * breakoutScore -
+        D_CONFIG.w5 * reversalRisk;
+      const fairPUp = sigmoid(scoreUp);
+      const fairPDown = 1 - fairPUp;
+
+      const askUp = bestAsk("UP", snapshot);
+      const askDown = bestAsk("DOWN", snapshot);
+      const spreadUp = snapshot.prices.up.spread ?? 1;
+      const spreadDown = snapshot.prices.down.spread ?? 1;
+      const depthUp = snapshot.prices.up.topDepth ?? 0;
+      const depthDown = snapshot.prices.down.topDepth ?? 0;
+      const entryEdgeUp = Math.max(0.03, D_CONFIG.feeEstimate + spreadUp + 0.01);
+      const entryEdgeDown = Math.max(0.03, D_CONFIG.feeEstimate + spreadDown + 0.01);
+      const effectiveUp = (askUp ?? 1) + D_CONFIG.feeEstimate + D_CONFIG.slippageBuffer;
+      const effectiveDown = (askDown ?? 1) + D_CONFIG.feeEstimate + D_CONFIG.slippageBuffer;
+
+      if (
+        z >= D_CONFIG.entryZ &&
+        absDelta >= D_CONFIG.minAbsDelta &&
+        slope10 > 0 &&
+        slope20 > 0 &&
+        slope40 > 0 &&
+        bullish3 >= 2 &&
+        noLongUpper &&
+        breakoutUp &&
+        askUp !== null &&
+        askUp <= D_CONFIG.maxAsk &&
+        spreadUp <= D_CONFIG.maxSpread &&
+        depthUp >= ORDER_SIZE * 3 &&
+        fairPUp - effectiveUp >= entryEdgeUp
+      ) {
+        return {
+          side: "UP",
+          reason: `D策略: z=${z.toFixed(2)}, fair=${fairPUp.toFixed(3)}, slope20=${slope20.toFixed(2)}, slope40=${slope40.toFixed(2)}`,
+        };
+      }
+
+      if (
+        z <= -D_CONFIG.entryZ &&
+        absDelta >= D_CONFIG.minAbsDelta &&
+        slope10 < 0 &&
+        slope20 < 0 &&
+        slope40 < 0 &&
+        bearish3 >= 2 &&
+        noLongLower &&
+        breakoutDown &&
+        askDown !== null &&
+        askDown <= D_CONFIG.maxAsk &&
+        spreadDown <= D_CONFIG.maxSpread &&
+        depthDown >= ORDER_SIZE * 3 &&
+        fairPDown - effectiveDown >= entryEdgeDown
+      ) {
+        return {
+          side: "DOWN",
+          reason: `D策略: z=${z.toFixed(2)}, fair=${fairPDown.toFixed(3)}, slope20=${slope20.toFixed(2)}, slope40=${slope40.toFixed(2)}`,
+        };
+      }
+      return null;
+    }
     default:
       return null;
   }
 }
 
 function maxHoldSeconds(strategyId: string): number {
+  if (strategyId === D_STRATEGY_ID) return 25;
   if (strategyId === "value-discount") return 50;
   if (strategyId === "trend-follow") return 60;
   return 70;
 }
 
 function takeProfit(strategyId: string): number {
+  if (strategyId === D_STRATEGY_ID) return 0.03;
   if (strategyId === "value-discount") return 0.04;
   if (strategyId === "trend-follow") return 0.05;
   return 0.055;
 }
 
 function stopLoss(strategyId: string): number {
+  if (strategyId === D_STRATEGY_ID) return -0.02;
   if (strategyId === "value-discount") return -0.025;
   if (strategyId === "trend-follow") return -0.03;
   return -0.028;
@@ -251,8 +458,10 @@ export function PolymarketMonitor() {
   const [strategies, setStrategies] = useState<StrategyState[]>(() => loadStrategies());
   const [auto, setAuto] = useState(true);
   const [proxyStatus, setProxyStatus] = useState("连接中...");
+  const [rtdsStatus, setRtdsStatus] = useState("连接中...");
   const [logs, setLogs] = useState<string[]>([]);
   const historyRef = useRef<PriceTick[]>([]);
+  const btcRef = useRef<BtcTick[]>([]);
 
   const pushLog = useCallback((msg: string) => {
     const time = new Date().toLocaleTimeString("zh-CN", { hour12: false });
@@ -288,6 +497,28 @@ export function PolymarketMonitor() {
     return () => window.clearInterval(timer);
   }, [refreshSnapshot]);
 
+  const refreshBtc = useCallback(async () => {
+    try {
+      const res = await fetch("/api/polymarket/btc", { cache: "no-store" });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = (await res.json()) as { prices?: { chainlink?: number | null; binance?: number | null } };
+      const chainlink = data.prices?.chainlink ?? null;
+      const binance = data.prices?.binance ?? null;
+      btcRef.current = [...btcRef.current, { ts: Date.now(), chainlink, binance }].slice(-600);
+      setRtdsStatus(chainlink !== null && binance !== null ? "RTDS就绪" : "RTDS部分可用");
+    } catch {
+      setRtdsStatus("RTDS不可用");
+    }
+  }, []);
+
+  useEffect(() => {
+    refreshBtc();
+    const timer = window.setInterval(() => {
+      refreshBtc();
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, [refreshBtc]);
+
   useEffect(() => {
     if (!snapshot) return;
 
@@ -318,12 +549,32 @@ export function PolymarketMonitor() {
           if (bid !== null) {
             const ret = bid / strategy.position.entry - 1;
             const holdSecs = (now - strategy.position.openedAt) / 1000;
+            let dExit = false;
+            if (strategy.id === D_STRATEGY_ID) {
+              const chainSeries = btcRef.current.map((t) => t.chainlink).filter((v): v is number => v !== null);
+              const priceToBeat = snapshot.market.priceToBeat;
+              if (priceToBeat !== null && chainSeries.length >= 31) {
+                const chain = chainSeries[chainSeries.length - 1];
+                const recent30 = chainSeries.slice(-31);
+                const returns30 = recent30.slice(1).map((v, i) => (v - recent30[i]) / recent30[i]);
+                const sigma30 = stddev(returns30) * priceToBeat;
+                const z = (chain - priceToBeat) / Math.max(sigma30, D_CONFIG.minVolFloor);
+                const shortSlope = slopeFromTicks(chainSeries, 10);
+                const directionInvalid =
+                  (strategy.position.side === "UP" && z < 0.3 && shortSlope < 0) ||
+                  (strategy.position.side === "DOWN" && z > -0.3 && shortSlope > 0);
+                dExit = directionInvalid || (holdSecs >= 10 && ret <= 0) || left <= 25;
+              } else {
+                dExit = left <= 25;
+              }
+            }
 
             if (
               ret >= takeProfit(strategy.id) ||
               ret <= stopLoss(strategy.id) ||
               holdSecs >= maxHoldSeconds(strategy.id) ||
               left <= FLAT_BEFORE_SECONDS ||
+              dExit ||
               strategy.position.entry > 0.92 ||
               historyRef.current[historyRef.current.length - 1]?.slug !== historyRef.current[historyRef.current.length - 2]?.slug
             ) {
@@ -350,7 +601,7 @@ export function PolymarketMonitor() {
           return { ...strategy, lastAction: "等待下一轮或资金恢复" };
         }
 
-        const entry = runEntryRule(strategy, historyRef.current, snapshot);
+        const entry = runEntryRule(strategy, historyRef.current, snapshot, btcRef.current);
         if (!entry) return strategy;
 
         const ask = bestAsk(entry.side, snapshot);
@@ -358,15 +609,22 @@ export function PolymarketMonitor() {
           return { ...strategy, lastAction: "信号出现，但价格不安全" };
         }
 
-        const qty = ORDER_SIZE / ask;
-        pushLog(`${strategy.name} 开仓 ${entry.side} @${ask.toFixed(3)}，投入1，原因：${entry.reason}`);
+        const isD = strategy.id === D_STRATEGY_ID;
+        const bid = bestBid(entry.side, snapshot);
+        const makerCandidate = bid !== null ? Math.min(ask, bid + 0.001) : ask;
+        const executionPrice = isD ? makerCandidate : ask;
+        const qty = ORDER_SIZE / executionPrice;
+        pushLog(
+          `${strategy.name} 开仓 ${entry.side} @${executionPrice.toFixed(3)}，投入1，原因：${entry.reason}${isD ? "（maker优先模拟）" : ""}`,
+        );
         return {
           ...strategy,
           cash: strategy.cash - ORDER_SIZE,
+          lastEntrySlug: isD ? snapshot.market.slug : strategy.lastEntrySlug ?? null,
           position: {
             side: entry.side,
             qty,
-            entry: ask,
+            entry: executionPrice,
             spent: ORDER_SIZE,
             openedAt: now,
             entryReason: entry.reason,
@@ -399,9 +657,11 @@ export function PolymarketMonitor() {
           <p>本金：每个策略起始 10；每次固定投入 1（按 Polymarket 份额定价计算：数量 = 1 / 买入价）。</p>
           <p>新版逻辑：不再限定“塌缩”，改为围绕高概率边做折价、趋势、回撤三类入场。</p>
           <p>当前事件：{snapshot?.market.eventTitle ?? "-"}</p>
+          <p>Price to Beat：{snapshot?.market.priceToBeat ? snapshot.market.priceToBeat.toFixed(2) : "-"}</p>
           <p>当前 slug：{snapshot?.market.slug ?? "-"}</p>
           <p>结算倒计时：<span className="text-lg font-semibold">{secsLeft(snapshot) ?? "-"}s</span></p>
           <p>代理状态：{proxyStatus}</p>
+          <p>RTDS状态：{rtdsStatus}</p>
           <div className="flex gap-2 pt-2">
             <Button variant="outline" onClick={() => refreshSnapshot(true)}>立即刷新</Button>
             <Button variant="outline" onClick={() => setAuto((v) => !v)}>{auto ? "暂停自动策略" : "恢复自动策略"}</Button>
@@ -450,12 +710,21 @@ export function PolymarketMonitor() {
             <p>Bid: {formatPrice(snapshot?.prices.up.bid ?? null)}</p>
             <p>Ask: {formatPrice(snapshot?.prices.up.ask ?? null)}</p>
             <p>Mid: {formatPrice(snapshot?.prices.up.mid ?? null)}</p>
+            <p>Spread: {formatPrice(snapshot?.prices.up.spread ?? null)}</p>
+            <p>TopDepth: {formatPrice(snapshot?.prices.up.topDepth ?? null)}</p>
           </div>
           <div className="rounded border border-slate-200 p-3">
             <p className="font-semibold">DOWN</p>
             <p>Bid: {formatPrice(snapshot?.prices.down.bid ?? null)}</p>
             <p>Ask: {formatPrice(snapshot?.prices.down.ask ?? null)}</p>
             <p>Mid: {formatPrice(snapshot?.prices.down.mid ?? null)}</p>
+            <p>Spread: {formatPrice(snapshot?.prices.down.spread ?? null)}</p>
+            <p>TopDepth: {formatPrice(snapshot?.prices.down.topDepth ?? null)}</p>
+          </div>
+          <div className="rounded border border-slate-200 p-3 md:col-span-2">
+            <p className="font-semibold">Recent Trade (market channel fallback)</p>
+            <p>Price: {formatPrice(snapshot?.recentTrade.price ?? null)}</p>
+            <p>Side: {snapshot?.recentTrade.side ?? "-"}</p>
           </div>
         </CardContent>
       </Card>
