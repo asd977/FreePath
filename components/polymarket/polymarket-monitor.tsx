@@ -27,6 +27,7 @@ type StrategyState = {
   losses: number;
   position: Position | null;
   lastAction: string;
+  idleTicks: number;
 };
 
 type PriceTick = {
@@ -97,6 +98,7 @@ function loadStrategies(): StrategyState[] {
       losses: 0,
       position: null,
       lastAction: "等待塌缩信号",
+      idleTicks: 0,
     },
     {
       id: "double-shock",
@@ -109,6 +111,7 @@ function loadStrategies(): StrategyState[] {
       losses: 0,
       position: null,
       lastAction: "等待双塌缩",
+      idleTicks: 0,
     },
     {
       id: "oversold-rebound",
@@ -121,6 +124,7 @@ function loadStrategies(): StrategyState[] {
       losses: 0,
       position: null,
       lastAction: "等待超跌+止跌",
+      idleTicks: 0,
     },
   ];
 
@@ -204,6 +208,19 @@ function runEntryRule(strategy: StrategyState, history: PriceTick[], snapshot: P
     default:
       return null;
   }
+}
+
+function runFallbackEntryRule(strategy: StrategyState, history: PriceTick[], snapshot: PolymarketSnapshotResponse): { side: Side; reason: string } | null {
+  if (strategy.idleTicks < 22 || history.length < 6) return null;
+  const upDropFast = historyDrop(history, "UP", 4);
+  const downDropFast = historyDrop(history, "DOWN", 4);
+  const side = pickByLargestDrop(upDropFast, downDropFast);
+  const sideRef = side === "UP" ? referencePrice("UP", snapshot) : referencePrice("DOWN", snapshot);
+  const drop = side === "UP" ? upDropFast : downDropFast;
+  if (sideRef !== null && sideRef < 0.65 && drop >= 0.008) {
+    return { side, reason: `长时间无成交，触发轻塌缩补单(drop=${drop.toFixed(3)})` };
+  }
+  return null;
 }
 
 function maxHoldSeconds(strategyId: string): number {
@@ -318,6 +335,7 @@ export function PolymarketMonitor() {
                 losses: strategy.losses + (win ? 0 : 1),
                 position: null,
                 lastAction: `平仓${strategy.position.side}，本次${pnl >= 0 ? "盈利" : "亏损"}${pnl.toFixed(3)}`,
+                idleTicks: 0,
               };
             }
           }
@@ -325,15 +343,15 @@ export function PolymarketMonitor() {
         }
 
         if (left <= FLAT_BEFORE_SECONDS + 5 || strategy.cash < ORDER_SIZE) {
-          return { ...strategy, lastAction: "等待下一轮或资金恢复" };
+          return { ...strategy, lastAction: "等待下一轮或资金恢复", idleTicks: strategy.idleTicks + 1 };
         }
 
-        const entry = runEntryRule(strategy, historyRef.current, snapshot);
-        if (!entry) return strategy;
+        const entry = runEntryRule(strategy, historyRef.current, snapshot) ?? runFallbackEntryRule(strategy, historyRef.current, snapshot);
+        if (!entry) return { ...strategy, idleTicks: strategy.idleTicks + 1 };
 
         const ask = bestAsk(entry.side, snapshot);
-        if (ask === null || ask <= 0 || ask >= 0.95) {
-          return { ...strategy, lastAction: "信号出现，但价格不安全" };
+        if (ask === null || ask <= 0 || ask >= 0.98) {
+          return { ...strategy, lastAction: "信号出现，但价格不安全", idleTicks: strategy.idleTicks + 1 };
         }
 
         const qty = ORDER_SIZE / ask;
@@ -350,6 +368,7 @@ export function PolymarketMonitor() {
             entryReason: entry.reason,
           },
           lastAction: `开仓${entry.side}：${entry.reason}`,
+          idleTicks: 0,
         };
       }),
     );
@@ -386,7 +405,7 @@ export function PolymarketMonitor() {
               variant="outline"
               onClick={() => {
                 historyRef.current = [];
-                setStrategies(loadStrategies().map((s) => ({ ...s, cash: INITIAL_CASH, realized: 0, trades: 0, wins: 0, losses: 0, position: null, lastAction: "手动重置" })));
+                setStrategies(loadStrategies().map((s) => ({ ...s, cash: INITIAL_CASH, realized: 0, trades: 0, wins: 0, losses: 0, position: null, lastAction: "手动重置", idleTicks: 0 })));
                 pushLog("已重置三套策略账户与统计");
               }}
             >
