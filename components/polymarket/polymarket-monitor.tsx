@@ -27,7 +27,6 @@ type StrategyState = {
   losses: number;
   position: Position | null;
   lastAction: string;
-  idleTicks: number;
 };
 
 type PriceTick = {
@@ -67,12 +66,14 @@ function referencePrice(side: Side, snapshot: PolymarketSnapshotResponse | null)
 
 function bestAsk(side: Side, snapshot: PolymarketSnapshotResponse | null) {
   if (!snapshot) return null;
-  return side === "UP" ? snapshot.prices.up.ask ?? snapshot.prices.up.mid : snapshot.prices.down.ask ?? snapshot.prices.down.mid;
+  if (side === "UP") return snapshot.prices.up.ask ?? snapshot.prices.up.mid ?? snapshot.prices.up.bid;
+  return snapshot.prices.down.ask ?? snapshot.prices.down.mid ?? snapshot.prices.down.bid;
 }
 
 function bestBid(side: Side, snapshot: PolymarketSnapshotResponse | null) {
   if (!snapshot) return null;
-  return side === "UP" ? snapshot.prices.up.bid ?? snapshot.prices.up.mid : snapshot.prices.down.bid ?? snapshot.prices.down.mid;
+  if (side === "UP") return snapshot.prices.up.bid ?? snapshot.prices.up.mid ?? snapshot.prices.up.ask;
+  return snapshot.prices.down.bid ?? snapshot.prices.down.mid ?? snapshot.prices.down.ask;
 }
 
 function secsLeft(snapshot: PolymarketSnapshotResponse | null) {
@@ -98,7 +99,6 @@ function loadStrategies(): StrategyState[] {
       losses: 0,
       position: null,
       lastAction: "等待塌缩信号",
-      idleTicks: 0,
     },
     {
       id: "double-shock",
@@ -111,7 +111,6 @@ function loadStrategies(): StrategyState[] {
       losses: 0,
       position: null,
       lastAction: "等待双塌缩",
-      idleTicks: 0,
     },
     {
       id: "oversold-rebound",
@@ -124,7 +123,6 @@ function loadStrategies(): StrategyState[] {
       losses: 0,
       position: null,
       lastAction: "等待超跌+止跌",
-      idleTicks: 0,
     },
   ];
 
@@ -153,6 +151,14 @@ function historyDrop(history: PriceTick[], side: Side, lookbackTicks: number): n
   return old - current;
 }
 
+function historyDropPct(history: PriceTick[], side: Side, lookbackTicks: number): number {
+  if (history.length <= lookbackTicks) return 0;
+  const current = side === "UP" ? history[history.length - 1].upMid : history[history.length - 1].downMid;
+  const old = side === "UP" ? history[history.length - 1 - lookbackTicks].upMid : history[history.length - 1 - lookbackTicks].downMid;
+  if (current === null || old === null || old <= 0) return 0;
+  return (old - current) / old;
+}
+
 function isMicroRebound(history: PriceTick[], side: Side): boolean {
   if (history.length < 4) return false;
   const a = side === "UP" ? history[history.length - 1].upMid : history[history.length - 1].downMid;
@@ -169,6 +175,10 @@ function runEntryRule(strategy: StrategyState, history: PriceTick[], snapshot: P
   const downDropFast = historyDrop(history, "DOWN", 4);
   const upDropSlow = historyDrop(history, "UP", 8);
   const downDropSlow = historyDrop(history, "DOWN", 8);
+  const upDropFastPct = historyDropPct(history, "UP", 4);
+  const downDropFastPct = historyDropPct(history, "DOWN", 4);
+  const upDropSlowPct = historyDropPct(history, "UP", 8);
+  const downDropSlowPct = historyDropPct(history, "DOWN", 8);
   const current = upDownFromSnapshot(snapshot);
 
   switch (strategy.id) {
@@ -176,8 +186,9 @@ function runEntryRule(strategy: StrategyState, history: PriceTick[], snapshot: P
       const side = pickByLargestDrop(upDropFast, downDropFast);
       const sideMid = side === "UP" ? current.up : current.down;
       const drop = side === "UP" ? upDropFast : downDropFast;
-      if (sideMid !== null && sideMid < 0.53 && sideMid > 0.1 && drop >= 0.03) {
-        return { side, reason: `急跌${drop.toFixed(3)}后抄底` };
+      const dropPct = side === "UP" ? upDropFastPct : downDropFastPct;
+      if (sideMid !== null && sideMid < 0.58 && sideMid > 0.08 && drop >= 0.015 && dropPct >= 0.06) {
+        return { side, reason: `急跌${drop.toFixed(3)}(${(dropPct * 100).toFixed(1)}%)后抄底` };
       }
       return null;
     }
@@ -187,9 +198,11 @@ function runEntryRule(strategy: StrategyState, history: PriceTick[], snapshot: P
       if (
         upAsk !== null &&
         downAsk !== null &&
-        upDropFast >= 0.02 &&
-        downDropFast >= 0.02 &&
-        upAsk + downAsk <= 0.985
+        upDropFast >= 0.012 &&
+        downDropFast >= 0.012 &&
+        upDropFastPct >= 0.035 &&
+        downDropFastPct >= 0.035 &&
+        upAsk + downAsk <= 0.99
       ) {
         const side: Side = upAsk <= downAsk ? "UP" : "DOWN";
         return { side, reason: `双边塌缩，选更便宜${side}` };
@@ -200,27 +213,15 @@ function runEntryRule(strategy: StrategyState, history: PriceTick[], snapshot: P
       const side = pickByLargestDrop(upDropSlow, downDropSlow);
       const sideMid = side === "UP" ? current.up : current.down;
       const deepDrop = side === "UP" ? upDropSlow : downDropSlow;
-      if (sideMid !== null && sideMid < 0.45 && deepDrop >= 0.05 && isMicroRebound(history, side)) {
-        return { side, reason: `超跌${deepDrop.toFixed(3)}后止跌回弹` };
+      const deepDropPct = side === "UP" ? upDropSlowPct : downDropSlowPct;
+      if (sideMid !== null && sideMid < 0.5 && deepDrop >= 0.02 && deepDropPct >= 0.1 && isMicroRebound(history, side)) {
+        return { side, reason: `超跌${deepDrop.toFixed(3)}(${(deepDropPct * 100).toFixed(1)}%)后止跌回弹` };
       }
       return null;
     }
     default:
       return null;
   }
-}
-
-function runFallbackEntryRule(strategy: StrategyState, history: PriceTick[], snapshot: PolymarketSnapshotResponse): { side: Side; reason: string } | null {
-  if (strategy.idleTicks < 22 || history.length < 6) return null;
-  const upDropFast = historyDrop(history, "UP", 4);
-  const downDropFast = historyDrop(history, "DOWN", 4);
-  const side = pickByLargestDrop(upDropFast, downDropFast);
-  const sideRef = side === "UP" ? referencePrice("UP", snapshot) : referencePrice("DOWN", snapshot);
-  const drop = side === "UP" ? upDropFast : downDropFast;
-  if (sideRef !== null && sideRef < 0.65 && drop >= 0.008) {
-    return { side, reason: `长时间无成交，触发轻塌缩补单(drop=${drop.toFixed(3)})` };
-  }
-  return null;
 }
 
 function maxHoldSeconds(strategyId: string): number {
@@ -335,7 +336,6 @@ export function PolymarketMonitor() {
                 losses: strategy.losses + (win ? 0 : 1),
                 position: null,
                 lastAction: `平仓${strategy.position.side}，本次${pnl >= 0 ? "盈利" : "亏损"}${pnl.toFixed(3)}`,
-                idleTicks: 0,
               };
             }
           }
@@ -343,15 +343,15 @@ export function PolymarketMonitor() {
         }
 
         if (left <= FLAT_BEFORE_SECONDS + 5 || strategy.cash < ORDER_SIZE) {
-          return { ...strategy, lastAction: "等待下一轮或资金恢复", idleTicks: strategy.idleTicks + 1 };
+          return { ...strategy, lastAction: "等待下一轮或资金恢复" };
         }
 
-        const entry = runEntryRule(strategy, historyRef.current, snapshot) ?? runFallbackEntryRule(strategy, historyRef.current, snapshot);
-        if (!entry) return { ...strategy, idleTicks: strategy.idleTicks + 1 };
+        const entry = runEntryRule(strategy, historyRef.current, snapshot);
+        if (!entry) return strategy;
 
         const ask = bestAsk(entry.side, snapshot);
         if (ask === null || ask <= 0 || ask >= 0.98) {
-          return { ...strategy, lastAction: "信号出现，但价格不安全", idleTicks: strategy.idleTicks + 1 };
+          return { ...strategy, lastAction: "信号出现，但价格不安全" };
         }
 
         const qty = ORDER_SIZE / ask;
@@ -368,7 +368,6 @@ export function PolymarketMonitor() {
             entryReason: entry.reason,
           },
           lastAction: `开仓${entry.side}：${entry.reason}`,
-          idleTicks: 0,
         };
       }),
     );
@@ -405,7 +404,7 @@ export function PolymarketMonitor() {
               variant="outline"
               onClick={() => {
                 historyRef.current = [];
-                setStrategies(loadStrategies().map((s) => ({ ...s, cash: INITIAL_CASH, realized: 0, trades: 0, wins: 0, losses: 0, position: null, lastAction: "手动重置", idleTicks: 0 })));
+                setStrategies(loadStrategies().map((s) => ({ ...s, cash: INITIAL_CASH, realized: 0, trades: 0, wins: 0, losses: 0, position: null, lastAction: "手动重置" })));
                 pushLog("已重置三套策略账户与统计");
               }}
             >
