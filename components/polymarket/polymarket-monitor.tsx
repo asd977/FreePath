@@ -77,6 +77,9 @@ const D_CONFIG = {
   slippageBuffer: 0.004,
   maxWaitFillSeconds: 3,
 };
+const SIM_TAKER_FEE_RATE = 0.006;
+const SIM_MAKER_FEE_RATE = 0;
+const SIM_TICK = 0.001;
 
 function formatPrice(value: number | null, digits = 3): string {
   if (value === null || !Number.isFinite(value)) return "-";
@@ -463,6 +466,30 @@ function stopLoss(strategyId: string): number {
   return -0.028;
 }
 
+function simulateEntryFill(strategyId: string, side: Side, snapshot: PolymarketSnapshotResponse): { fillPrice: number; feeRate: number; mode: "maker" | "taker" } | null {
+  const ask = bestAsk(side, snapshot);
+  const bid = bestBid(side, snapshot);
+  if (ask === null || ask <= 0) return null;
+
+  const makerLimit = bid !== null ? bid + SIM_TICK : null;
+  if (makerLimit !== null && makerLimit >= ask - SIM_TICK) {
+    return { fillPrice: Math.min(makerLimit, ask), feeRate: SIM_MAKER_FEE_RATE, mode: "maker" };
+  }
+
+  const spread = side === "UP" ? snapshot.prices.up.spread ?? null : snapshot.prices.down.spread ?? null;
+  if (strategyId === D_STRATEGY_ID) {
+    if (spread !== null && spread <= D_CONFIG.maxSpread) {
+      return { fillPrice: ask, feeRate: SIM_TAKER_FEE_RATE, mode: "taker" };
+    }
+    return null;
+  }
+
+  if (spread !== null && spread <= 0.05) {
+    return { fillPrice: ask, feeRate: SIM_TAKER_FEE_RATE, mode: "taker" };
+  }
+  return null;
+}
+
 export function PolymarketMonitor() {
   const [snapshot, setSnapshot] = useState<PolymarketSnapshotResponse | null>(null);
   const [strategies, setStrategies] = useState<StrategyState[]>(() => loadStrategies());
@@ -615,22 +642,24 @@ export function PolymarketMonitor() {
         if (!entry) return strategy;
 
         const ask = bestAsk(entry.side, snapshot);
-        if (ask === null || ask <= 0 || ask >= 0.96) {
+        const maxSafeAsk = strategy.id === D_STRATEGY_ID ? 0.9 : 0.985;
+        if (ask === null || ask <= 0 || ask >= maxSafeAsk) {
           return { ...strategy, lastAction: "信号出现，但价格不安全" };
         }
 
-        const isD = strategy.id === D_STRATEGY_ID;
-        const bid = bestBid(entry.side, snapshot);
-        const makerCandidate = bid !== null ? Math.min(ask, bid + 0.001) : ask;
-        const executionPrice = isD ? makerCandidate : ask;
+        const fill = simulateEntryFill(strategy.id, entry.side, snapshot);
+        if (!fill) {
+          return { ...strategy, lastAction: "信号出现，但模拟挂单未成交（流动性不足）" };
+        }
+        const executionPrice = fill.fillPrice * (1 + fill.feeRate);
         const qty = ORDER_SIZE / executionPrice;
         pushLog(
-          `${strategy.name} 开仓 ${entry.side} @${executionPrice.toFixed(3)}，投入1，原因：${entry.reason}${isD ? "（maker优先模拟）" : ""}`,
+          `${strategy.name} 开仓 ${entry.side} @${executionPrice.toFixed(3)}，投入1，原因：${entry.reason}（${fill.mode}模拟${fill.feeRate > 0 ? `+fee ${(fill.feeRate * 100).toFixed(2)}%` : ""}）`,
         );
         return {
           ...strategy,
           cash: strategy.cash - ORDER_SIZE,
-          lastEntrySlug: isD ? snapshot.market.slug : strategy.lastEntrySlug ?? null,
+          lastEntrySlug: strategy.id === D_STRATEGY_ID ? snapshot.market.slug : strategy.lastEntrySlug ?? null,
           position: {
             side: entry.side,
             qty,
