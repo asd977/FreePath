@@ -7,7 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint",
-    "dev:session": "next dev -p 3001"
+    "dev:session": "node tools/session-tool/server.mjs"
   },
   "dependencies": {
     "next": "16.2.3",
