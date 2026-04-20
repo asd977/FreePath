@@ -294,7 +294,7 @@ function runEntryRule(
       const sideAsk = bestAsk(side, snapshot);
       if (sideMid === null || sideAsk === null || sideAsk <= 0) return null;
       const discount = sideMid - sideAsk;
-      if (sideMid >= 0.6 && sideMid <= 0.9 && discount >= 0.015) {
+      if (sideMid >= 0.55 && sideMid <= 0.92 && discount >= 0.008) {
         return { side, reason: `高概率${(sideMid * 100).toFixed(1)}%且折价${discount.toFixed(3)}` };
       }
       return null;
@@ -307,7 +307,7 @@ function runEntryRule(
       const fastMovePct = side === "UP" ? upMoveFastPct : downMoveFastPct;
       const slowMove = side === "UP" ? upMoveSlow : downMoveSlow;
       const ask = bestAsk(side, snapshot);
-      if (sideMid !== null && ask !== null && sideMid >= 0.58 && sideMid <= 0.88 && fastMove >= 0.01 && fastMovePct >= 0.02 && slowMove > 0) {
+      if (sideMid !== null && ask !== null && sideMid >= 0.54 && sideMid <= 0.9 && fastMove >= 0.004 && fastMovePct >= 0.008 && slowMove > 0) {
         return { side, reason: `趋势上行${fastMove.toFixed(3)}，概率${(sideMid * 100).toFixed(1)}%` };
       }
       return null;
@@ -317,8 +317,16 @@ function runEntryRule(
       const side = dominantSide;
       const sideMid = side === "UP" ? current.up : current.down;
       const fastMove = side === "UP" ? upMoveFast : downMoveFast;
+      const fastMovePct = side === "UP" ? upMoveFastPct : downMoveFastPct;
       const slowMovePct = side === "UP" ? upMoveSlowPct : downMoveSlowPct;
-      if (sideMid !== null && sideMid >= 0.62 && sideMid <= 0.9 && slowMovePct > 0 && fastMove > 0 && isPullbackThenResume(history, side)) {
+      if (
+        sideMid !== null &&
+        sideMid >= 0.58 &&
+        sideMid <= 0.92 &&
+        slowMovePct > -0.005 &&
+        fastMove > 0 &&
+        (isPullbackThenResume(history, side) || fastMovePct > 0.01)
+      ) {
         return { side, reason: `回撤后再转强，当前概率${(sideMid * 100).toFixed(1)}%` };
       }
       return null;
@@ -357,8 +365,10 @@ function runEntryRule(
       const bearish3 = recent3.filter((c) => c.close < c.open).length;
       const noLongUpper = recent2.every((c) => !longUpperWick(c));
       const noLongLower = recent2.every((c) => !longLowerWick(c));
-      const recent30High = Math.max(...chainSeries.slice(-30));
-      const recent30Low = Math.min(...chainSeries.slice(-30));
+      const prev30 = chainSeries.slice(-31, -1);
+      if (!prev30.length) return null;
+      const recent30High = Math.max(...prev30);
+      const recent30Low = Math.min(...prev30);
       const breakoutUp = chain > recent30High && chainSeries.slice(-D_CONFIG.breakoutHoldSeconds).every((v) => v >= recent30High);
       const breakoutDown = chain < recent30Low && chainSeries.slice(-D_CONFIG.breakoutHoldSeconds).every((v) => v <= recent30Low);
       const divergence = Math.abs(chain - binance);
@@ -392,7 +402,7 @@ function runEntryRule(
         slope40 > 0 &&
         bullish3 >= 2 &&
         noLongUpper &&
-        breakoutUp &&
+        (breakoutUp || (slope20 > 0.8 && fairPUp > 0.66)) &&
         askUp !== null &&
         askUp <= D_CONFIG.maxAsk &&
         spreadUp <= D_CONFIG.maxSpread &&
@@ -413,7 +423,7 @@ function runEntryRule(
         slope40 < 0 &&
         bearish3 >= 2 &&
         noLongLower &&
-        breakoutDown &&
+        (breakoutDown || (slope20 < -0.8 && fairPDown > 0.66)) &&
         askDown !== null &&
         askDown <= D_CONFIG.maxAsk &&
         spreadDown <= D_CONFIG.maxSpread &&
