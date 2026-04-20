@@ -367,9 +367,9 @@ function runEntryRule(
     case D_STRATEGY_ID: {
       const now = Date.now();
       const elapsed = elapsedSecs(snapshot) ?? 0;
-      const left = secsLeft(snapshot) ?? 0;
+      const left = secsLeft(snapshot);
       if (elapsed <= 30) return null;
-      if (elapsed > 210 || left < 45) return null;
+      if (elapsed > 210 || (left !== null && left < 45)) return null;
       if (strategy.lastEntrySlug === snapshot.market.slug) return null;
       const chainSeries = btcTicks.map((t) => t.chainlink).filter((v): v is number => v !== null);
       const binanceSeries = btcTicks.map((t) => t.binance).filter((v): v is number => v !== null);
@@ -604,7 +604,7 @@ export function PolymarketMonitor() {
 
     if (!auto) return;
 
-    const left = secsLeft(snapshot) ?? 0;
+    const left = secsLeft(snapshot);
 
     setStrategies((prev) =>
       prev.map((strategy) => {
@@ -629,9 +629,9 @@ export function PolymarketMonitor() {
                 const directionInvalid =
                   (strategy.position.side === "UP" && z < 0.3 && shortSlope < 0) ||
                   (strategy.position.side === "DOWN" && z > -0.3 && shortSlope > 0);
-                dExit = directionInvalid || (holdSecs >= 10 && ret <= 0) || left <= 25;
+                dExit = directionInvalid || (holdSecs >= 10 && ret <= 0) || (left !== null && left <= 25);
               } else {
-                dExit = left <= 25;
+                dExit = left !== null && left <= 25;
               }
             }
 
@@ -639,7 +639,7 @@ export function PolymarketMonitor() {
               ret >= takeProfit(strategy.id) ||
               ret <= stopLoss(strategy.id) ||
               holdSecs >= maxHoldSeconds(strategy.id) ||
-              left <= FLAT_BEFORE_SECONDS ||
+              (left !== null && left <= FLAT_BEFORE_SECONDS) ||
               dExit ||
               strategy.position.entry > 0.92 ||
               historyRef.current[historyRef.current.length - 1]?.slug !== historyRef.current[historyRef.current.length - 2]?.slug
@@ -663,7 +663,7 @@ export function PolymarketMonitor() {
           return strategy;
         }
 
-        if (left <= FLAT_BEFORE_SECONDS + 5 || strategy.cash < ORDER_SIZE) {
+        if ((left !== null && left <= FLAT_BEFORE_SECONDS + 5) || strategy.cash < ORDER_SIZE) {
           return { ...strategy, lastAction: "等待下一轮或资金恢复" };
         }
 
