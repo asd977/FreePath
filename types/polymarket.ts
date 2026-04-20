@@ -38,6 +38,10 @@ export type SidePrice = {
   bid: number | null;
   ask: number | null;
   mid: number | null;
+  spread: number | null;
+  topBidSize: number | null;
+  topAskSize: number | null;
+  topDepth: number | null;
 };
 
 export type PolymarketSnapshotResponse = {
@@ -48,10 +52,15 @@ export type PolymarketSnapshotResponse = {
     startDate: string;
     endDate: string;
     source: string;
+    priceToBeat: number | null;
   };
   prices: {
     up: SidePrice;
     down: SidePrice;
+  };
+  recentTrade: {
+    price: number | null;
+    side: "buy" | "sell" | null;
   };
   candidates: string[];
   fetchedAt: string;
