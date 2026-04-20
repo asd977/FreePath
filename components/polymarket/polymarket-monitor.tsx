@@ -112,9 +112,39 @@ function bestBid(side: Side, snapshot: PolymarketSnapshotResponse | null) {
   return snapshot.prices.down.bid ?? snapshot.prices.down.mid ?? snapshot.prices.down.ask;
 }
 
+function windowFromSlug(slug: string | undefined): { startTs: number; endTs: number } | null {
+  if (!slug) return null;
+  const matched = slug.match(/btc-updown-5m-(\d{10})/);
+  if (!matched) return null;
+  const startTs = Number(matched[1]);
+  if (!Number.isFinite(startTs)) return null;
+  return { startTs, endTs: startTs + 300 };
+}
+
 function secsLeft(snapshot: PolymarketSnapshotResponse | null) {
-  if (!snapshot?.market.endDate) return null;
-  return Math.max(0, Math.floor((Date.parse(snapshot.market.endDate) - Date.now()) / 1000));
+  if (!snapshot) return null;
+  const nowMs = Date.now();
+  const fromEndDateRaw = snapshot.market.endDate ? Date.parse(snapshot.market.endDate) : NaN;
+  const fromEndDate = Number.isFinite(fromEndDateRaw) ? Math.floor((fromEndDateRaw - nowMs) / 1000) : null;
+  const window = windowFromSlug(snapshot.market.slug);
+  const fromSlug = window ? window.endTs - Math.floor(nowMs / 1000) : null;
+  const values = [fromEndDate, fromSlug].filter((v): v is number => v !== null && Number.isFinite(v));
+  if (!values.length) return null;
+  return Math.max(0, Math.max(...values));
+}
+
+function elapsedSecs(snapshot: PolymarketSnapshotResponse | null): number | null {
+  if (!snapshot) return null;
+  const nowMs = Date.now();
+  const fromStartDateRaw = snapshot.market.startDate ? Date.parse(snapshot.market.startDate) : NaN;
+  const fromStartDate = Number.isFinite(fromStartDateRaw) ? Math.floor((nowMs - fromStartDateRaw) / 1000) : null;
+  const window = windowFromSlug(snapshot.market.slug);
+  const fromSlug = window ? Math.floor(nowMs / 1000) - window.startTs : null;
+  const values = [fromStartDate, fromSlug].filter((v): v is number => v !== null && Number.isFinite(v));
+  if (!values.length) return null;
+  const nonNegative = values.filter((v) => v >= 0);
+  if (!nonNegative.length) return 0;
+  return Math.min(...nonNegative);
 }
 
 function upDownFromSnapshot(snapshot: PolymarketSnapshotResponse | null) {
@@ -336,8 +366,7 @@ function runEntryRule(
     }
     case D_STRATEGY_ID: {
       const now = Date.now();
-      const marketStart = Date.parse(snapshot.market.startDate);
-      const elapsed = Number.isFinite(marketStart) ? Math.max(0, Math.floor((now - marketStart) / 1000)) : 0;
+      const elapsed = elapsedSecs(snapshot) ?? 0;
       const left = secsLeft(snapshot) ?? 0;
       if (elapsed <= 30) return null;
       if (elapsed > 210 || left < 45) return null;
